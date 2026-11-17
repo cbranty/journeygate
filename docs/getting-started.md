@@ -7,6 +7,8 @@ This guide takes an existing app repository, with one service or several, from z
 
 It describes what the code does today. Where the design in [`propuesta-arquitectura.md`](propuesta-arquitectura.md) promises more than is built, the guide says so.
 
+This guide stops at the CLI and the CI check. To run `guard serve` in production, where a Jira ticket moved to a start status ends in a draft pull request written by agents, follow [`installation.md`](installation.md). It starts from the `target.toml` and the catalog that sections 2 and 4 of this guide produce.
+
 ## Quick path
 
 ```sh
@@ -440,6 +442,8 @@ guard connect --list                  # what is configured, secrets masked
 
 Details: [`cli.md`](contracts/cli.md#guard-connect).
 
+`guard connect` configures one machine. A deployed `guard serve` reads the same names (`JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `GITHUB_TOKEN`, `GITLAB_TOKEN`) from its environment, and it uses one more key of `[tracker]`: `start_statuses`, the Jira statuses that start triage when a ticket is moved to them. Both are set up in [`installation.md`](installation.md).
+
 ## 4. Write your first journeys
 
 Start with 3 to 5 journeys: the flows that cost money or users when they break (sign-in, checkout, the main form).
@@ -777,7 +781,7 @@ From then on a PR with a broken journey cannot be merged.
 | `guard init --ci` on an initialised repo | `--force` rewrites `target.toml` too | Commit first and restore `target.toml`, or copy section 7.3 by hand |
 | `guard init --mcp` writing Codex or Copilot config in your home directory | Only `.mcp.json` is wired directly | Copy the rendered file (section 6) |
 | Jev impact, Jira, GitHub with real credentials in CI | Verified only against fakes so far | `--affected` falls back to path rules; reporting failures are warnings, never change the verdict |
-| A `guard serve` deployment checked end to end with real Jira and code host credentials (`deploy/docker-compose.yml` runs it, see `deploy/README.md`) | Without a server: no dashboard, no `guard repro` | Run the CLI-only setup above; it is complete without a server |
+| A `guard serve` deployment checked end to end with real Jira and code host credentials (`deploy/docker-compose.yml` and `deploy/docker-compose.dokploy.yml` run it; see `deploy/README.md` and [`installation.md`](installation.md)) | Without a server: no dashboard, no `guard repro` | Run the CLI-only setup above; it is complete without a server |
 
 ## Checklist
 

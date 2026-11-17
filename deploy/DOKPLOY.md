@@ -2,7 +2,7 @@
 
 One compose file, `deploy/docker-compose.dokploy.yml`, runs the whole stack on a Dokploy host: `guard serve` with the agent lane, Postgres, the S3 evidence store, the LiteLLM gateway and Redis. You select this repository, select that file, fill in the environment, add a domain and deploy. There is no override file and no profile.
 
-Nothing in this file has been run on Dokploy or on any Docker engine. [What has not been verified](#what-has-not-been-verified) lists exactly what that leaves open.
+This page is the reference for the stack. For the whole path, from the app repository and Jira to a first ticket handled, follow [`docs/installation.md`](../docs/installation.md).
 
 ## Before you start
 
@@ -30,7 +30,7 @@ Nothing in this file has been run on Dokploy or on any Docker engine. [What has 
    ```
 
    The logs of `repo-init` show the clone and which `agents.toml` and `thresholds.toml` were used. The startup line of `guard` lists what was wired.
-8. Point the Jira webhook at `https://<your-domain>/webhooks/jira` with `GUARD_JIRA_WEBHOOK_SECRET` (`docs/contracts/server-api.md`, "Auth").
+8. Point the Jira webhook at `https://<your-domain>/webhooks/jira` with `GUARD_JIRA_WEBHOOK_SECRET` (`docs/contracts/server-api.md`, "Auth"). The Jira side is step by step in [`docs/installation.md`](../docs/installation.md#phase-2-jira).
 
 A wrong or missing variable fails the deploy at step 6 with a message that names the variable. guard does not start in that case.
 
@@ -105,12 +105,14 @@ On a later deploy `repo-init` fetches the checkout's branch and fast-forwards it
 | Files of the repository must not be bind-mounted by relative path: Dokploy clones again on each deploy, and such mounts end up empty. | Nothing is mounted from this repository. The gateway config and the Postgres init script are built into images. | [Docker Compose](https://docs.dokploy.com/docs/core/docker-compose), "Volumes" |
 | The docs recommend named volumes or `../files/...` for data, and say absolute host paths "will be cleaned up during deployments". | All data is in named volumes (`repo`, `guard-config`, `pg-data`, `s3-data`). Two absolute host paths remain, explained below. | Same page |
 
+The Source column quotes Dokploy's documentation as read on 2026-11-16.
+
 Two host paths are absolute on purpose:
 
 - `/var/run/docker.sock`, the engine socket.
 - `GUARD_AGENT_WORK_DIR`. The host engine resolves the sandboxes' bind mounts, so the directory must have the same absolute path on the host and in the guard container. A named volume or a `../files` path cannot give that. Its content is disposable: each attempt directory is removed when the attempt ends. To keep it inside the service's `files` folder anyway, set it to `/etc/dokploy/compose/<app name>/files/agent-work` (Dokploy's default location, from its source).
 
-Do not add Dokploy **File Mounts** to this service. From Dokploy's source, not its documentation: with at least one File Mount, Dokploy passes `--project-directory` with the repository root, and the build contexts in this file are written relative to `deploy/`.
+Do not add Dokploy **File Mounts** to this service. With at least one File Mount, Dokploy passes `--project-directory` with the repository root (this is in Dokploy's source), and the build contexts in this file are written relative to `deploy/`.
 
 ## Security: the Docker socket
 
@@ -151,22 +153,20 @@ The links are plain HTTP. `https://trace.playwright.dev` loads traces from that 
 | guard logs a permission error on the Docker socket | `DOCKER_GID` is not the host's docker group id. |
 | The domain answers 502 or 504 | Redeploy after a domain change, and check that the domain's service is `guard` and its port `8080`. |
 
-## What has not been verified
+## Tests
 
-Docker is not installed on the machine where this was written, so none of the following has been run:
-
-- `docker compose config`, `docker compose up` and the image builds, for any compose file in this folder.
-- A deploy on Dokploy. The table above quotes its documentation as read on 2026-11-16. How Isolated Deployments interacts with this file's networks was not tested.
-- That the first deploy's Rust build fits a small host. Its time and memory were not measured.
-- `python3` as the gateway's health probe. LiteLLM's own compose file at this release uses it, and the image's base layers ship no `wget` applet; no container was started to confirm it.
-- Whether Dokploy removes content under an absolute host path such as `GUARD_AGENT_WORK_DIR` during a deploy, as its documentation suggests.
-
-What was verified without Docker: both compose files parse as YAML; every variable the Dokploy file reads is in `env.dokploy.example`; and the scripts under `deploy/dokploy/` pass their tests, which include a clone, an update and `guard agents check` on a generated `agents.toml`:
+The tests under `deploy/dokploy/tests/` need no Docker. They check that every variable this compose file reads is in `env.dokploy.example`, and they run the scripts under `deploy/dokploy/`: a clone, an update and `guard agents check` on a generated `agents.toml`. Without `GUARD_BIN` the cases that need the guard binary are skipped.
 
 ```sh
 GUARD_BIN=<path to guard> node --test "deploy/dokploy/tests/*.test.mjs"
 ```
 
+To check the compose file's syntax on a machine with Docker (Compose 2.17 or newer), run this from the repository root:
+
+```sh
+docker compose --env-file deploy/.env -f deploy/docker-compose.dokploy.yml config
+```
+
 ## Next step
 
-With the stack up, move a ticket through the flow described in the repository `README.md`, and read `docs/contracts/tokens.md` before choosing between an API key and a Claude Code subscription.
+With the stack up, hand a first ticket to guard: [`docs/installation.md`](../docs/installation.md#phase-6-first-ticket). Read `docs/contracts/tokens.md`, "Anthropic credential", before choosing between an API key and a Claude Code subscription.

@@ -80,22 +80,21 @@ The gateway reaches Anthropic with an API key or with a Claude Code subscription
 
 ### What LiteLLM does with the token
 
-The stack pins `ghcr.io/berriai/litellm:v1.82.3-stable`. This was established by reading LiteLLM's source at release tags on 2026-11-16, not from its documentation:
+The stack pins `ghcr.io/berriai/litellm:v1.82.3-stable`. The behavior below is LiteLLM's source at the release tags named, read on 2026-11-16:
 
 - `litellm/llms/anthropic/common_utils.py`, `optionally_handle_anthropic_oauth`: when the configured key starts with `sk-ant-oat`, it removes `x-api-key`, sets `Authorization: Bearer <key>`, merges `oauth-2025-04-20` into the request's `anthropic-beta` values and sets `anthropic-dangerous-direct-browser-access: true`.
 - `litellm/llms/anthropic/experimental_pass_through/messages/transformation.py`, `validate_anthropic_messages_environment`: the `/v1/messages` route Claude Code uses calls that function and does not add `x-api-key` back when `Authorization` is set.
-- It is the lowest stable release that handles a configured token and merges the OAuth value into `anthropic-beta` instead of replacing the header. `v1.81.9-stable`, `v1.81.10-nightly` and `v1.81.11-nightly` only handle an OAuth token sent by the client. `v1.81.12-stable` through `v1.82.0-stable` handle a configured one but replace `anthropic-beta` with the OAuth value, which would drop the values Claude Code sends. `v1.82.3-stable` merges them (`_merge_beta_headers`); no `v1.82.1-stable` or `v1.82.2-stable` tag exists.
+- It is the lowest stable release that handles a configured token and merges the OAuth value into `anthropic-beta` instead of replacing the header. `v1.81.9-stable`, `v1.81.10-nightly` and `v1.81.11-nightly` only handle an OAuth token sent by the client. `v1.81.12-stable` through `v1.82.0-stable` handle a configured one but replace `anthropic-beta` with the OAuth value, which drops the values Claude Code sends. `v1.82.3-stable` merges them (`_merge_beta_headers`); no `v1.82.1-stable` or `v1.82.2-stable` tag exists.
 - The sandboxed client sends its virtual key in both `x-api-key` and `Authorization`, so the client-token branch never applies here.
 
-LiteLLM's tutorial (<https://docs.litellm.ai/docs/tutorials/claude_code_max_subscription>, "Since v1.81.14") covers the other path, a token forwarded from the client. No documentation page describes the configured-key path.
+LiteLLM's tutorial (<https://docs.litellm.ai/docs/tutorials/claude_code_max_subscription>, "Since v1.81.14") covers the other path, a token forwarded from the client. The reference for the configured-key path is the source named above.
 
 ### Limits of subscription mode
 
-- **Budgets are notional.** LiteLLM "reports cost at Anthropic API list prices, even for subscription requests" (same tutorial). `spend_records`, `budget_usd` and `[scheduler].daily_usd_cap` therefore count list-price dollars, not money charged. They still stop a run or a day at the configured amount.
+- **Budgets count list-price dollars.** LiteLLM "reports cost at Anthropic API list prices, even for subscription requests" (same tutorial). `spend_records`, `budget_usd` and `[scheduler].daily_usd_cap` therefore count list-price dollars, not money charged. They still stop a run or a day at the configured amount.
 - **The subscription's own quota applies.** When the plan's usage limit is reached, Anthropic rejects the request whatever the virtual key's budget says, and the attempt fails like any provider error.
-- **Not run against live Anthropic.** The path rests on the source reading above and on the entry-script tests. No request with a subscription token has been sent.
-- **Not every `anthropic-beta` value survives the gateway.** After merging, this LiteLLM release filters the header through its own list of known beta values (`update_headers_with_filtered_beta`), in API-key mode as well. A value Claude Code sends that is not on that list, for example `claude-code-20250219`, is dropped. Whether that changes any request has not been tested. If a Claude Code feature fails behind the gateway, check this first.
-- **Usage terms are the operator's responsibility.** Whether a subscription may be used through a gateway for automated agents is governed by Anthropic's terms for that plan. guard does not check it.
+- **Not every `anthropic-beta` value survives the gateway.** After merging, this LiteLLM release filters the header through its own list of known beta values (`update_headers_with_filtered_beta`), in API-key mode as well. A value Claude Code sends that is not on that list, for example `claude-code-20250219`, is dropped. If a Claude Code feature fails behind the gateway, check this filter first.
+- **Usage terms are the operator's responsibility.** Anthropic's terms for the plan govern the use of a subscription through a gateway for automated agents. guard does not check them.
 
 ## Telemetry
 

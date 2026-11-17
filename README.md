@@ -14,6 +14,11 @@ curl -fsSL https://carlosbranty.github.io/journeygate/install.sh | sh
 irm https://carlosbranty.github.io/journeygate/install.ps1 | iex
 ```
 
+| You want | Start here |
+| --- | --- |
+| The gate on your laptop and in CI | [Quick start](#quick-start), then [`docs/getting-started.md`](docs/getting-started.md). |
+| The service in production: a Jira ticket moved to a start status ends in a draft pull request | [`docs/installation.md`](docs/installation.md). |
+
 ## Why
 
 End-to-end suites are slow, flaky, and cannot tell "this PR broke it" from "it was already broken on main", so teams learn to ignore them. journeygate runs only what a change can affect, re-runs every hard failure against the base commit, and reports a single required `guard` check. Code written by coding agents needs a gate the agents cannot edit, skip or talk their way past; the same gate serves human and agent pull requests alike.
@@ -22,11 +27,15 @@ End-to-end suites are slow, flaky, and cannot tell "this PR broke it" from "it w
 
 The core is a deterministic E2E gate with **no AI** in the verdict. Triage and the agent lane are optional layers on top of it: triage runs in Shadow Mode by default (it only suggests), and the agent lane only opens draft pull requests. Nothing is ever merged automatically.
 
+Triage starts when a Jira ticket is created, and when a team member moves a ticket to a status listed in `[tracker].start_statuses`. The decision engine is optional for the second trigger.
+
 ```mermaid
 flowchart TD
-    J["Jira ticket"] --> T["Triage: decision engine + deterministic gatekeeper<br/>(Shadow Mode by default)"]
+    J["Jira ticket created,<br/>or moved to a start status"] --> T["Triage: deterministic gatekeeper<br/>+ decision engine (optional for a status move)<br/>(Shadow Mode by default)"]
     T -->|"agent lane (optional)"| QA["QA agent writes the spec<br/>red-first, then sealed"]
     QA --> C["Coder agent attempts"]
+    GW["Model gateway (LiteLLM):<br/>Anthropic API key or Claude Code subscription"] -.->|"only model endpoint"| QA
+    GW -.-> C
     C --> G["Gate in a no-egress sandbox"]
     G --> D["Draft PR on branch agent/KEY<br/>human approval required"]
     T -->|"human lane"| H["Developer + coding assistant over guard mcp"]
@@ -42,6 +51,23 @@ flowchart TD
     V -->|"red"| KO["Required guard check fails"]
     F --> E["Jira bug + PR comment + evidence bundle"]
 ```
+
+### From a Jira ticket to a draft pull request
+
+Clients file tickets. A team member hands one to guard by moving it to a start status, for example `In Development`. The feature is off until `[tracker].start_statuses` in `target.toml` lists at least one status.
+
+| | With the decision engine | Without the decision engine |
+| --- | --- | --- |
+| Configuration | `TYPESAFE_API_KEY` is set. | Nothing. |
+| Who picks the area | The engine. In `active` mode guard writes the `area:<key>` label. | The team. The ticket needs an `area:<key>` label that names a key of `[areas]` before it is moved. guard never picks an area by itself. |
+| Rules that send the ticket to the human lane | The hard rules, a sensitive area, then the thresholds of `thresholds.toml` on the engine's answers. | The hard rules, then a missing `area:<key>` label (`no_area_label`) or an area with `sensitive = true` (`sensitive_area`). |
+| A ticket that is only created | Triaged at creation. A ticket the gatekeeper sends to the agent lane starts there, before any move. | Recorded for the human lane. Only the move to a start status reaches the agents. |
+
+In both columns the agents start only when thresholds are in `active` mode, and the result is a draft pull request on branch `agent/<KEY>` that a human approves. In Shadow Mode the decision is recorded and suggested, and no agent starts.
+
+Agents reach models only through the LiteLLM gateway. The gateway bills an Anthropic API key (`ANTHROPIC_API_KEY`) or a Claude Code subscription (`CLAUDE_CODE_OAUTH_TOKEN`, the output of `claude setup-token`). When both are set, the subscription token is used. Under a subscription, budgets count API list-price dollars, the plan's own quota applies, and the plan's usage terms are the operator's responsibility ([`tokens.md`](docs/contracts/tokens.md), "Anthropic credential").
+
+The whole stack deploys on Dokploy from one compose file configured by environment variables. [`docs/installation.md`](docs/installation.md) is the path from an empty host to a first ticket handled.
 
 ## Quick start
 
@@ -102,7 +128,11 @@ Point the CLI at it with `[server] url = "http://127.0.0.1:8099"` in `target.tom
 | Dashboard | Read-only pages served by `guard serve` (decisions, gate results, flaky tests, durations, coverage, agents). |
 | Desktop GUI | `guard-gui`, a native egui window over the `guard` binary. Stores API keys in the Windows Credential Manager. Not shipped in releases yet: build it with cargo ([`guard-gui/README.md`](guard-gui/README.md)). |
 | Triage | `guard serve` routes a Jira ticket to the agent lane or the human lane when it is created, and when it is moved to a status listed in `[tracker].start_statuses` (off by default). Hard rules on facts are never overridden; Shadow Mode only suggests labels. |
+| Start on a status change | A team member moves a ticket to a start status and triage runs for it. It works with or without the decision engine; without one, the ticket needs an `area:<key>` label that exists in `[areas]`. |
 | Agent lane | Optional: QA writes the spec, red-first, sealed; the Coder attempts; the gate runs in a no-egress sandbox; a draft PR on `agent/<KEY>` waits for human approval. |
+| Model credential | The gateway bills an Anthropic API key or a Claude Code subscription token. The credential stays in the gateway container; a sandbox holds only a per-attempt virtual key. |
+| Dokploy deployment | One compose file, [`deploy/docker-compose.dokploy.yml`](deploy/docker-compose.dokploy.yml), runs the whole stack. It clones the app repository and writes `agents.toml` and `thresholds.toml` from environment variables ([`deploy/DOKPLOY.md`](deploy/DOKPLOY.md)). |
+| Published images | The [`images`](.github/workflows/images.yml) workflow pushes the `guard-server` and `guard-sandbox` images to GHCR on every `v*` tag and on manual runs, and prints each digest. |
 
 ### `guard explain` configuration
 
@@ -150,8 +180,10 @@ Full method, C# and PHP extensions, and threats to validity: [`docs/benchmarks/i
 | Code hosts | GitHub and GitLab: PRs/MRs, commit statuses, comments and draft PRs. They are not used for issue intake. |
 | CI | The GitHub Action [`ci/github-action`](ci/github-action/action.yml) and the GitLab component [`ci/gitlab/templates/gate.yml`](ci/gitlab/templates/gate.yml). |
 | Agent runtimes | `claude-code`, `codex` and `mini-swe-agent` (admitted); `copilot-cli` and `openhands` (provisional); a scripted `fake` for tests. Runtime and gateway behavior is verified only with fakes and recorded fixtures. |
-| Model gateway | LiteLLM, the only egress allowed from agent sandboxes. |
+| Model gateway | LiteLLM, the only egress allowed from agent sandboxes. For Claude models it holds an Anthropic API key or a Claude Code subscription token. |
 | Decision engine | TypeSafe Jev, optional, proprietary and paid. Without it, triage of a created ticket fails closed to the human lane and affected selection keeps the path rules. A ticket moved to a start status is still decided: the hard rules apply, then it needs an `area:<key>` label naming a non-sensitive area of `target.toml` to reach the agent lane ([`server-api.md`](docs/contracts/server-api.md), "Start on a status change"). |
+| Deployment | Docker Compose on a host you run yourself, or Dokploy from one compose file ([`deploy/README.md`](deploy/README.md)). |
+| Container registry | GHCR: the `images` workflow publishes `guard-server` and `guard-sandbox`. The agent lane accepts a sandbox image only by digest. |
 
 ## CLI reference
 
@@ -241,9 +273,19 @@ Shared traits live in `guard-core/src/ports/`; adapters never depend on each oth
 | `schemas/` | JSON Schemas for `target.toml` and `journeys.json`, with contract tests. |
 | `ci/` | GitHub Action, GitLab component and CI tests. |
 | `install/` | `install.sh` and `install.ps1`, the release installers. |
-| `deploy/` | Images, Compose stack, sandbox image and gateway config. |
+| `deploy/` | Images, the Compose stack, the one-file Dokploy stack with its scripts (`deploy/dokploy/`), the sandbox image and the gateway config. |
+| `.github/workflows/` | CI, the release, the installer pages and the `images` workflow that publishes the server and sandbox images. |
 | `bench/` | The guard-impact vs CodeGraph benchmark. |
-| `docs/` | Getting started, contracts, benchmarks and the architecture proposal. |
+| `docs/` | Getting started, the installation guide, contracts, benchmarks and the architecture proposal. |
+
+### Guides
+
+| Guide | Covers |
+| --- | --- |
+| [`docs/getting-started.md`](docs/getting-started.md) | `guard` on your own app: install, `guard init`, journeys, the local loop and the GitHub workflow. |
+| [`docs/installation.md`](docs/installation.md) | Production on Dokploy, end to end: app repository, Jira, model credential, images, deploy, first ticket and day-two operations. |
+| [`deploy/DOKPLOY.md`](deploy/DOKPLOY.md) | Reference for the Dokploy stack: every variable, what each deploy does, security and troubleshooting. |
+| [`deploy/README.md`](deploy/README.md) | The images and the Compose stack on a host you run yourself. |
 
 ### Contracts
 
@@ -259,14 +301,25 @@ Shared traits live in `guard-core/src/ports/`; adapters never depend on each oth
 | [`demo-app.md`](docs/contracts/demo-app.md) | Routes, selectors and data of the reference app. |
 | [`ports.md`](docs/contracts/ports.md) | The shared ports, crate ownership and how later layers change the core commands. |
 | [`finalize-phase2.md`](docs/contracts/finalize-phase2.md) | Baseline, evidence and reporting of `guard gate finalize`. |
-| [`server-api.md`](docs/contracts/server-api.md), [`mcp-tools.md`](docs/contracts/mcp-tools.md) | `guard serve` HTTP API and environment, and `guard mcp` tools. |
+| [`server-api.md`](docs/contracts/server-api.md), [`mcp-tools.md`](docs/contracts/mcp-tools.md) | `guard serve` HTTP API, webhooks (including the start on a status change) and environment, and `guard mcp` tools. |
+| [`thresholds-toml.md`](docs/contracts/thresholds-toml.md), [`decision-log.md`](docs/contracts/decision-log.md) | The triage mode and thresholds, and the stored decisions with what started each one and whether an engine was used. |
 | [`agents-toml.md`](docs/contracts/agents-toml.md), [`sandbox.md`](docs/contracts/sandbox.md), [`qa-coder-protocol.md`](docs/contracts/qa-coder-protocol.md) | Agent lane configuration, sandboxes and the QA/Coder protocol. |
+| [`tokens.md`](docs/contracts/tokens.md), [`pr-publisher.md`](docs/contracts/pr-publisher.md) | The model gateway, the Anthropic credential (API key or Claude Code subscription) and spend; how the draft pull request on `agent/<KEY>` is published. |
 
 The full design, in Spanish, is in [`docs/propuesta-arquitectura.md`](docs/propuesta-arquitectura.md).
 
 ## Self-hosting
 
-You do not need a server to use `guard` as a CLI. To run `guard serve` with Postgres and a SeaweedFS evidence store, plus the LiteLLM gateway and Redis under the `agents` Compose profile, see [`deploy/README.md`](deploy/README.md).
+You do not need a server to use `guard` as a CLI. `guard serve` runs with Postgres, a SeaweedFS evidence store, the LiteLLM gateway and Redis. There are two ways to deploy it:
+
+| You have | Use | Guide |
+| --- | --- | --- |
+| A Dokploy host | `deploy/docker-compose.dokploy.yml`: the whole stack in one file, agent lane included, configured by environment variables. | [`docs/installation.md`](docs/installation.md) for the full path, [`deploy/DOKPLOY.md`](deploy/DOKPLOY.md) for the reference. |
+| A host where you run `docker compose` yourself | `deploy/docker-compose.yml`, plus `deploy/docker-compose.agents.yml` and the `agents` profile for the agent lane. | [`deploy/README.md`](deploy/README.md). |
+
+The agent lane gives `guard serve` the Docker socket, which is control of the host. Use a dedicated host for it.
+
+The sandbox image is referenced by digest. The `images` workflow ([`images.yml`](.github/workflows/images.yml)) publishes it to GHCR with the `server` image and prints both digests.
 
 ## Development
 
@@ -314,7 +367,14 @@ DATABASE_URL=postgres://<user>:<password>@localhost:55432/postgres \
 
 It starts `guard serve --fake` on a copy of `examples/demo-shop`, a fake gateway container (`deploy/litellm/fake-gateway.mjs`), sends a Jira webhook, and checks the sealed spec, the rejected and accepted Coder attempts, egress, the PR branch, spend records, memory facts and `guard_history`.
 
-Releases are cut by pushing a `v*` tag that matches the workspace version ([`release.yml`](.github/workflows/release.yml)).
+Releases are cut by pushing a `v*` tag that matches the workspace version ([`release.yml`](.github/workflows/release.yml)). The same tag publishes the `guard-server` and `guard-sandbox` images to GHCR ([`images.yml`](.github/workflows/images.yml)); that workflow also runs on demand.
+
+The tests of the deploy scripts and of the workflows run without Docker:
+
+```sh
+node --test "deploy/dokploy/tests/*.test.mjs"       # Dokploy stack scripts; GUARD_BIN=<path to guard> adds the tests that need the binary
+node --test ci/tests/images.test.mjs                # the images workflow
+```
 
 ## Contributing
 

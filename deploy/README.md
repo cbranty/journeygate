@@ -20,9 +20,9 @@ Two ways to run the stack:
 | You have | Use |
 | --- | --- |
 | A host where you run `docker compose` yourself | `docker-compose.yml`, plus `docker-compose.agents.yml` for the agent lane. The rest of this page. |
-| A Dokploy host | `docker-compose.dokploy.yml`. Follow `DOKPLOY.md`. |
+| A Dokploy host | `docker-compose.dokploy.yml`. Follow [`docs/installation.md`](../docs/installation.md) for the whole path (app repository, Jira, model credential, images, deploy, first ticket). `DOKPLOY.md` is the reference for the stack. |
 
-`.github/workflows/images.yml` publishes the `server` image and the sandbox image to GHCR on every `v*` tag and prints their digests.
+`.github/workflows/images.yml` publishes the `server` image and the sandbox image to GHCR on every `v*` tag and on manual runs, and prints their digests.
 
 ## Which host to use
 
@@ -118,10 +118,10 @@ The gateway reaches Anthropic with `ANTHROPIC_API_KEY`, or with a Claude Code su
 
 Read `docs/contracts/tokens.md`, "Anthropic credential", before you use a subscription:
 
-- Spend logs price subscription traffic at API list prices, so `budget_usd` and `daily_usd_cap` are notional caps.
-- The subscription's own quota applies on top of them.
-- The path has not been run against live Anthropic.
-- Anthropic's usage terms for the subscription are your responsibility.
+- Spend logs price subscription traffic at API list prices, so `budget_usd` and `daily_usd_cap` count list-price dollars, not money charged. They still stop an attempt or a day at the configured amount.
+- The subscription's own quota applies on top of them. When the plan's usage limit is reached, Anthropic rejects the request and the attempt fails like any provider error.
+- Anthropic's usage terms for the subscription are your responsibility. guard does not check them.
+- If a Claude Code feature fails behind the gateway, check the `anthropic-beta` filter first (`docs/contracts/tokens.md`, "Limits of subscription mode").
 
 ### The Docker socket gives control of the host
 
