@@ -1,0 +1,354 @@
+# Dokploy deployment of the whole guard stack in one file: guard serve with
+# the agent lane, Postgres, the S3 evidence store, the LiteLLM gateway and
+# Redis. No override file and no profile. Steps and limits: deploy/DOKPLOY.md.
+#
+# In Dokploy: create a Docker Compose service on this repository with compose
+# path ./deploy/docker-compose.dokploy.yml, paste deploy/env.dokploy.example
+# into the Environment tab, add a domain for service `guard` port 8080, deploy.
+# Every value comes from that environment; this file holds no secret.
+#
+# What differs from docker-compose.yml + docker-compose.agents.yml:
+#   - The app repository is cloned by repo-init into the `repo` volume. Nothing
+#     is bind-mounted from the host except the Docker socket and the agent
+#     work dir, and nothing is bind-mounted from this repository: Dokploy
+#     clones it again on every deploy, which empties such mounts. The gateway
+#     config and the Postgres init script are built into their images.
+#   - agents.toml and thresholds.toml come from the environment unless the app
+#     repository commits them (deploy/dokploy/render-config.sh).
+#   - guard is reached through a Dokploy domain: port 8080 is not published.
+#   - No `name:`: Dokploy sets the project name.
+#
+# SECURITY: guard gets /var/run/docker.sock, which is control of the host's
+# Docker engine and therefore root on the host. Anyone who compromises guard
+# serve (a webhook bug, a leaked GUARD_SERVER_TOKEN, a malicious dependency)
+# owns the host and every other Dokploy app on it. Use a dedicated host for
+# this stack, ideally with rootless Docker or gVisor
+# (GUARD_SANDBOX_RUNTIME=runsc). The sandboxes are hardened; the orchestrator
+# that holds the socket is not.
+#
+# Local syntax check, from the repository root (needs Compose 2.17 or newer
+# for dockerfile_inline):
+#   docker compose --env-file deploy/.env -f deploy/docker-compose.dokploy.yml config
+
+services:
+  # ---- init 1 of 2: ownership (root, no network use) --------------------------
+  # The checkout and config volumes and the agent work dir must belong to the
+  # guard user. Docker creates a missing bind-mount source as root, so this is
+  # also what makes the work dir exist on the host without a manual step.
+  volume-init:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        for dir in /repo /config "$$GUARD_AGENT_WORK_DIR"; do
+          mkdir -p "$$dir"
+          chown 10001:10001 "$$dir"
+        done
+    environment:
+      GUARD_AGENT_WORK_DIR: ${GUARD_AGENT_WORK_DIR:-/var/lib/guard/agent-work}
+    volumes:
+      - repo:/repo
+      - guard-config:/config
+      - ${GUARD_AGENT_WORK_DIR:-/var/lib/guard/agent-work}:${GUARD_AGENT_WORK_DIR:-/var/lib/guard/agent-work}
+
+  # ---- init 2 of 2: checkout, agents.toml, thresholds.toml, skills ------------
+  # deploy/dokploy/init.sh, as the guard user. It runs on every deploy: a
+  # checkout that exists is fast-forwarded, never reset. A wrong variable
+  # fails here, so the deploy fails and guard does not start.
+  repo-init:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    restart: "no"
+    entrypoint: ["/usr/local/lib/guard-deploy/init.sh"]
+    environment:
+      # The app repository. The URL is optional on github.com and gitlab.com,
+      # where it is derived from GITHUB_REPOSITORY or GITLAB_PROJECT.
+      GUARD_APP_REPO_URL:
+      GUARD_APP_REPO_REF:
+      # The code-host token of the stack; it is also the clone credential.
+      GITHUB_TOKEN:
+      GITHUB_REPOSITORY:
+      GITHUB_API_URL:
+      GITLAB_TOKEN:
+      GITLAB_PROJECT:
+      GITLAB_API_URL:
+      # agents.toml, when the app repository commits none.
+      GUARD_AGENT_MODEL:
+      GUARD_AGENT_QA_MODEL:
+      GUARD_AGENT_CODER_MODEL:
+      GUARD_AGENT_RUNTIME:
+      GUARD_AGENT_BUDGET_USD:
+      GUARD_AGENT_DAILY_USD_CAP:
+      GUARD_AGENT_HOST_SLOTS:
+      GUARD_SANDBOX_IMAGE:
+      # thresholds.toml, when the app repository commits none.
+      GUARD_THRESHOLDS_MODE:
+    volumes:
+      - repo:/repo
+      - guard-config:/config
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+
+  guard:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    # start.sh refuses to start without the files repo-init wrote.
+    entrypoint: ["/usr/local/lib/guard-deploy/start.sh"]
+    command: ["serve", "--repo", "/repo"]
+    init: true
+    restart: unless-stopped
+    # Reached through the Dokploy domain (Traefik), not a host port.
+    expose:
+      - "8080"
+    # The socket is root:docker on the host; the guard user (uid 10001) joins
+    # that group by numeric id (`getent group docker` on the host).
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID in the Dokploy environment (getent group docker | cut -d: -f3 on the host)}"
+    environment:
+      # Postgres for triage, gate results, memory and the agent lane queue.
+      DATABASE_URL: postgres://guard:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the Dokploy environment}@postgres:5432/guard
+      # Bearer token for /api/*; guard serve refuses to start without it.
+      GUARD_SERVER_TOKEN: ${GUARD_SERVER_TOKEN:?set GUARD_SERVER_TOKEN in the Dokploy environment}
+      # Evidence store. guard signs presigned evidence links for exactly this
+      # host (SigV4 covers it), so it is S3_PUBLIC_HOST and not the service
+      # name: it must resolve for readers outside the stack (port 8333 is
+      # published) and for guard (network alias on s3).
+      GUARD_STORAGE_URL: s3+http://${S3_ACCESS_KEY:?set S3_ACCESS_KEY in the Dokploy environment}:${S3_SECRET_KEY:?set S3_SECRET_KEY in the Dokploy environment}@${S3_PUBLIC_HOST:?set S3_PUBLIC_HOST in the Dokploy environment (DNS name readers use to reach this host)}:8333/${S3_BUCKET:-guard-evidence}
+      # Written by repo-init: generated from the environment, or a copy of the
+      # file the app repository commits.
+      GUARD_AGENTS_TOML: /config/agents.toml
+      GUARD_THRESHOLDS: /config/thresholds.toml
+      # The orchestrator mints and revokes gateway virtual keys with it
+      # ([gateway].master_key_env in agents.toml).
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in the Dokploy environment}
+      # agents.toml [gateway].url is what a sandbox uses (http://litellm:4000,
+      # resolved to its egress forwarder); the orchestrator talks to it here.
+      GUARD_GATEWAY_ADMIN_URL: http://litellm:4000
+      # Forwarders start on the gateway network, where only litellm lives.
+      GUARD_SANDBOX_EGRESS_NETWORK: guard-gateway
+      # Sandbox bind mounts are resolved by the host engine, so the work dir
+      # has the same absolute path on the host and in this container.
+      GUARD_AGENT_WORK_DIR: ${GUARD_AGENT_WORK_DIR:-/var/lib/guard/agent-work}
+      GUARD_SANDBOX_RUNTIME:
+      GUARD_AGENT_KEEP_WORK:
+      GUARD_REPO:
+      # Optional adapters: passed through only when set (server-api.md,
+      # "Environment"). Unset = the route answers 501. Jev is optional.
+      GUARD_DASHBOARD_TOKEN:
+      GUARD_STALENESS_INTERVAL:
+      TYPESAFE_API_KEY:
+      JEV_URL:
+      JIRA_BASE_URL:
+      JIRA_EMAIL:
+      JIRA_API_TOKEN:
+      JIRA_SUGGESTED_FIELD:
+      JIRA_ACCEPTANCE_CRITERIA_FIELD:
+      JIRA_PRE_EXISTING_PRIORITY:
+      GUARD_JIRA_WEBHOOK_SECRET:
+      GITHUB_TOKEN:
+      GITHUB_REPOSITORY:
+      GITHUB_API_URL:
+      GUARD_GITHUB_WEBHOOK_SECRET:
+      GITLAB_TOKEN:
+      GITLAB_PROJECT:
+      GITLAB_API_URL:
+      GUARD_GITLAB_WEBHOOK_SECRET:
+      GUARD_MEMORY_READ_DATABASE_URL:
+    volumes:
+      # The app checkout repo-init cloned. Only this container reads and
+      # writes it (clone source, publish worktrees, agent/<KEY> branches).
+      - repo:/repo
+      - guard-config:/config:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${GUARD_AGENT_WORK_DIR:-/var/lib/guard/agent-work}:${GUARD_AGENT_WORK_DIR:-/var/lib/guard/agent-work}
+    networks: [default, gateway]
+    depends_on:
+      repo-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+      s3-init:
+        condition: service_completed_successfully
+      litellm:
+        condition: service_healthy
+
+  postgres:
+    # postgres:17.6-bookworm plus deploy/postgres/init, which creates the
+    # `litellm` database when the volume is first initialized.
+    build:
+      context: ./postgres
+      dockerfile_inline: |
+        FROM postgres:17.6-bookworm
+        COPY init/ /docker-entrypoint-initdb.d/
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: guard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the Dokploy environment}
+      POSTGRES_DB: guard
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "guard", "-d", "guard"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # S3-compatible evidence store (SeaweedFS, single node): the S3 API on
+  # :8333, path-style. The identity file is written inside the container from
+  # the environment at every start; nothing is stored in git.
+  s3:
+    image: chrislusf/seaweedfs:3.97
+    restart: unless-stopped
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY in the Dokploy environment}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY in the Dokploy environment}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        umask 077
+        printf '{"identities":[{"name":"guard","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" > /tmp/s3.json
+        # allowedOrigins: trace links open in https://trace.playwright.dev,
+        # which fetches the presigned trace from the bucket (CORS).
+        exec weed -logtostderr=true server -dir=/data -ip=s3 -ip.bind=0.0.0.0 \
+          -volume.max=0 -master.volumeSizeLimitMB=1024 \
+          -s3 -s3.port=8333 -s3.config=/tmp/s3.json \
+          -s3.allowedOrigins=https://trace.playwright.dev
+    # Evidence links are presigned for S3_PUBLIC_HOST:8333, so the S3 API is
+    # published on the host and that name also resolves to this container
+    # inside the stack. Every object request still needs the credentials or a
+    # signature.
+    ports:
+      - "8333:8333"
+    networks:
+      default:
+        aliases:
+          - ${S3_PUBLIC_HOST:?set S3_PUBLIC_HOST in the Dokploy environment (DNS name readers use to reach this host)}
+    volumes:
+      - s3-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # One-shot bootstrap: creates the evidence bucket and its retention (TTL).
+  # Keep S3_EVIDENCE_TTL in line with [evidence].retention_days (default 14).
+  s3-init:
+    image: chrislusf/seaweedfs:3.97
+    restart: "no"
+    environment:
+      S3_BUCKET: ${S3_BUCKET:-guard-evidence}
+      S3_EVIDENCE_TTL: ${S3_EVIDENCE_TTL:-14d}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        printf 's3.bucket.create -name %s\nfs.configure -locationPrefix=/buckets/%s/ -ttl=%s -apply\n' \
+          "$$S3_BUCKET" "$$S3_BUCKET" "$$S3_EVIDENCE_TTL" | weed shell -master=s3:9333 -filer=s3:8888
+    depends_on:
+      s3:
+        condition: service_healthy
+
+  # ---- the model gateway (docs/contracts/tokens.md) ----------------------------
+  # The only model endpoint a sandbox can reach. Provider credentials are
+  # passed through by name; deploy/litellm/config.yaml holds none and is
+  # built into the image.
+  litellm:
+    # Keep the release equal to the pin in docker-compose.yml: the lowest
+    # LiteLLM release whose Anthropic adapter sends a configured Claude Code
+    # subscription token as `Authorization: Bearer` (tokens.md, "Anthropic
+    # credential").
+    build:
+      context: ./litellm
+      dockerfile_inline: |
+        FROM ghcr.io/berriai/litellm:v1.82.3-stable
+        COPY config.yaml /app/config.yaml
+    restart: unless-stopped
+    # CLAUDE_CODE_OAUTH_TOKEN, when set, replaces ANTHROPIC_API_KEY inside this
+    # container only, so the gateway bills the subscription and not the API key.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        test -n "$$LITELLM_MASTER_KEY" || { echo "set LITELLM_MASTER_KEY in the Dokploy environment" >&2; exit 1; }
+        if [ -n "$${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+          case "$$CLAUDE_CODE_OAUTH_TOKEN" in
+            sk-ant-oat*) export ANTHROPIC_API_KEY="$$CLAUDE_CODE_OAUTH_TOKEN" ;;
+            *) echo "CLAUDE_CODE_OAUTH_TOKEN must start with sk-ant-oat (the output of claude setup-token)" >&2; exit 1 ;;
+          esac
+        fi
+        exec docker/prod_entrypoint.sh "$$@"
+      - --
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in the Dokploy environment}
+      LITELLM_DATABASE_URL: postgresql://guard:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the Dokploy environment}@postgres:5432/litellm
+      DATABASE_URL: postgresql://guard:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the Dokploy environment}@postgres:5432/litellm
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in the Dokploy environment}
+      ANTHROPIC_API_KEY:
+      CLAUDE_CODE_OAUTH_TOKEN:
+      OPENAI_API_KEY:
+      GEMINI_API_KEY:
+      OTEL_EXPORTER_OTLP_ENDPOINT:
+      OTEL_EXPORTER_OTLP_PROTOCOL:
+    networks: [default, gateway]
+    healthcheck:
+      # python3, as in LiteLLM's own compose file: this image has no wget or curl.
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Response cache of the gateway (litellm_settings.cache_params).
+  redis:
+    image: redis:7.4.6-bookworm
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in the Dokploy environment}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set REDIS_PASSWORD in the Dokploy environment}
+    command: ["sh", "-c", 'exec redis-server --requirepass "$$REDIS_PASSWORD"']
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+networks:
+  # The gateway network: litellm and guard only. Sandbox egress forwarders
+  # start here (GUARD_SANDBOX_EGRESS_NETWORK), so they can reach the gateway
+  # but not Postgres or the evidence store. The name is fixed: guard looks the
+  # network up by name, whatever project name Dokploy gives the stack.
+  gateway:
+    name: guard-gateway
+
+volumes:
+  # The app checkout (with .guard/ and the agent/<KEY> branches).
+  repo:
+  # agents.toml and thresholds.toml as guard reads them.
+  guard-config:
+  pg-data:
+  s3-data:

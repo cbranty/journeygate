@@ -70,3 +70,7 @@ jobs:
         run: node --test "examples/demo-shop/test/*.test.mjs"
       - name: CI config tests
         run: node --test "ci/tests/*.test.mjs"
+      # The Dokploy start scripts (deploy/DOKPLOY.md). Without GUARD_BIN the
+      # cases that need the guard binary are skipped.
+      - name: Dokploy script tests
+        run: node --test "deploy/dokploy/tests/*.test.mjs"

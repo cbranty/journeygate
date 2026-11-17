@@ -12,6 +12,8 @@
 #   server  slim Debian image for `guard serve` (deploy/docker-compose.yml).
 #           Ships git, curl and the Docker CLI; the agent lane only works when
 #           a Docker engine is reachable (deploy/README.md, "Agent lane").
+#           Also ships the init and start scripts of the Dokploy stack in
+#           /usr/local/lib/guard-deploy (deploy/DOKPLOY.md).
 #
 # Keep PLAYWRIGHT_VERSION equal to the exact @playwright/test pin in
 # e2e-playwright/package.json (override with --build-arg).
@@ -75,6 +77,10 @@ RUN set -eu; \
 # unless a Docker engine is reachable (socket mount or DOCKER_HOST).
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=build /out/guard /usr/local/bin/guard
+# Init and start scripts of the Dokploy stack (deploy/docker-compose.dokploy.yml,
+# deploy/DOKPLOY.md). Nothing runs them unless a compose file names them: the
+# entry point below is unchanged.
+COPY --chmod=0755 deploy/dokploy/init.sh deploy/dokploy/render-config.sh deploy/dokploy/start.sh /usr/local/lib/guard-deploy/
 ENV NO_COLOR=1
 USER guard
 WORKDIR /repo

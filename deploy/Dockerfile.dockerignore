@@ -22,6 +22,8 @@
 !templates/**
 !ci/gitlab/templates/**
 !languages/**
+# The scripts the server target ships for the Dokploy stack.
+!deploy/dokploy/*.sh
 # Build outputs, dependencies and local state never enter the image.
 **/target/
 **/node_modules/
