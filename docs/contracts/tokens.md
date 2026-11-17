@@ -67,6 +67,36 @@ Rules:
 - **Spike** (before enabling Anthropic context editing): verify LiteLLM forwards the `anthropic-beta` header and the `context_management` body field to native `anthropic/` deployments. Until verified, context editing stays off.
 - **OpenHands**: `LLMSummarizingCondenser` with its own `usage_id` (e.g. `condenser`) so its spend is separable — **to confirm in the adapter** against the OpenHands SDK version pinned there.
 
+## Anthropic credential: API key or Claude Code subscription
+
+The gateway reaches Anthropic with an API key or with a Claude Code subscription token. Either one lives only in the gateway container's environment. A sandbox still holds only its virtual key, and no runtime adapter changes.
+
+| Set in the gateway environment | Credential LiteLLM sends | Billed to |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` only | the API key, as `x-api-key` | the API account |
+| `CLAUDE_CODE_OAUTH_TOKEN`, with or without `ANTHROPIC_API_KEY` | the subscription token, as `Authorization: Bearer` | the Claude Code subscription |
+
+`CLAUDE_CODE_OAUTH_TOKEN` is the output of `claude setup-token`. `deploy/litellm/config.yaml` reads one name, `os.environ/ANTHROPIC_API_KEY`. The `litellm` service of both compose files starts the proxy through an inline entry script: when the token is set, the script exports it as `ANTHROPIC_API_KEY` for that container only. It refuses to start when the token does not begin with `sk-ant-oat`, so an API key pasted into the wrong variable is never used silently. With the token unset, the script changes nothing. `deploy/dokploy/tests/gateway-credential.test.mjs` runs that script for both files.
+
+### What LiteLLM does with the token
+
+The stack pins `ghcr.io/berriai/litellm:v1.82.3-stable`. This was established by reading LiteLLM's source at release tags on 2026-11-16, not from its documentation:
+
+- `litellm/llms/anthropic/common_utils.py`, `optionally_handle_anthropic_oauth`: when the configured key starts with `sk-ant-oat`, it removes `x-api-key`, sets `Authorization: Bearer <key>`, merges `oauth-2025-04-20` into the request's `anthropic-beta` values and sets `anthropic-dangerous-direct-browser-access: true`.
+- `litellm/llms/anthropic/experimental_pass_through/messages/transformation.py`, `validate_anthropic_messages_environment`: the `/v1/messages` route Claude Code uses calls that function and does not add `x-api-key` back when `Authorization` is set.
+- It is the lowest stable release that handles a configured token and merges the OAuth value into `anthropic-beta` instead of replacing the header. `v1.81.9-stable`, `v1.81.10-nightly` and `v1.81.11-nightly` only handle an OAuth token sent by the client. `v1.81.12-stable` through `v1.82.0-stable` handle a configured one but replace `anthropic-beta` with the OAuth value, which would drop the values Claude Code sends. `v1.82.3-stable` merges them (`_merge_beta_headers`); no `v1.82.1-stable` or `v1.82.2-stable` tag exists.
+- The sandboxed client sends its virtual key in both `x-api-key` and `Authorization`, so the client-token branch never applies here.
+
+LiteLLM's tutorial (<https://docs.litellm.ai/docs/tutorials/claude_code_max_subscription>, "Since v1.81.14") covers the other path, a token forwarded from the client. No documentation page describes the configured-key path.
+
+### Limits of subscription mode
+
+- **Budgets are notional.** LiteLLM "reports cost at Anthropic API list prices, even for subscription requests" (same tutorial). `spend_records`, `budget_usd` and `[scheduler].daily_usd_cap` therefore count list-price dollars, not money charged. They still stop a run or a day at the configured amount.
+- **The subscription's own quota applies.** When the plan's usage limit is reached, Anthropic rejects the request whatever the virtual key's budget says, and the attempt fails like any provider error.
+- **Not run against live Anthropic.** The path rests on the source reading above and on the entry-script tests. No request with a subscription token has been sent.
+- **Not every `anthropic-beta` value survives the gateway.** After merging, this LiteLLM release filters the header through its own list of known beta values (`update_headers_with_filtered_beta`), in API-key mode as well. A value Claude Code sends that is not on that list, for example `claude-code-20250219`, is dropped. Whether that changes any request has not been tested. If a Claude Code feature fails behind the gateway, check this first.
+- **Usage terms are the operator's responsibility.** Whether a subscription may be used through a gateway for automated agents is governed by Anthropic's terms for that plan. guard does not check it.
+
 ## Telemetry
 
 Claude Code exports OTel with `CLAUDE_CODE_ENABLE_TELEMETRY=1`, `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`, `OTEL_EXPORTER_OTLP_ENDPOINT=<orchestrator collector>` (the collector host is an extra egress rule only when OTel is enabled; it is not a model endpoint). LiteLLM's `otel` callback and `guard-server` GenAI spans go to the same collector; GenAI semantic conventions are pinned by commit of `open-telemetry/semantic-conventions` in the server crate. Spans carry `run_id`, `arm` and `key_alias` attributes, never prompt text.

@@ -16,6 +16,16 @@
 # Code sends the model name it was started with (`--model`), so a bare Claude
 # name is exposed too.
 #
+# Anthropic credential: `ANTHROPIC_API_KEY` is the only name this file reads.
+# Both compose stacks start the proxy through an entry script that, when
+# `CLAUDE_CODE_OAUTH_TOKEN` is set, puts that Claude Code subscription token in
+# `ANTHROPIC_API_KEY` for this container only. Source check (BerriAI/litellm
+# tag v1.82.3-stable, litellm/llms/anthropic/common_utils.py,
+# `optionally_handle_anthropic_oauth`): a configured key that starts with
+# `sk-ant-oat` is sent as `Authorization: Bearer` with `anthropic-beta:
+# oauth-2025-04-20`, and `x-api-key` is dropped. docs/contracts/tokens.md,
+# "Anthropic credential", has the limits of that mode.
+#
 # Nothing here has been run against a live proxy: no provider credentials
 # exist on the dev machine.
 

@@ -8,9 +8,21 @@ This folder holds two images and a Compose stack for `guard serve`. You do not n
 | `docker-compose.yml` | Runs `guard serve`, Postgres, an S3 evidence store and, under the `agents` profile, the LiteLLM gateway. |
 | `docker-compose.agents.yml` | Optional override. It gives guard the Docker socket so the agent lane can start sandboxes. |
 | `env.example` | Every variable the stack reads, by name only. Copy it to `deploy/.env`, which git ignores. |
+| `docker-compose.dokploy.yml` | The whole stack in one file for a Dokploy host, agent lane included. See `DOKPLOY.md`. |
+| `env.dokploy.example` | Every variable that file reads, by name only, for the Dokploy Environment tab. |
+| `dokploy/` | The scripts the `server` image ships for that file (clone the app repository, write `agents.toml` and `thresholds.toml` from the environment) and their tests. |
 | `litellm/config.yaml` | Gateway models. Provider keys come from the environment. |
 | `postgres/init/` | Runs only when the Postgres volume is created for the first time. Creates the `litellm` database. |
 | `sandbox/` | The image the agents run in (see `sandbox/README.md`). |
+
+Two ways to run the stack:
+
+| You have | Use |
+| --- | --- |
+| A host where you run `docker compose` yourself | `docker-compose.yml`, plus `docker-compose.agents.yml` for the agent lane. The rest of this page. |
+| A Dokploy host | `docker-compose.dokploy.yml`. Follow `DOKPLOY.md`. |
+
+`.github/workflows/images.yml` publishes the `server` image and the sandbox image to GHCR on every `v*` tag and prints their digests.
 
 ## Which host to use
 
@@ -65,7 +77,7 @@ The startup line in `docker compose -f deploy/docker-compose.yml logs guard` lis
 | `postgres` | `postgres:17.6-bookworm` | Decision log, gate history, memory and the agent queue. Data is kept in the `pg-data` volume. |
 | `s3` | `chrislusf/seaweedfs:3.97` | Evidence store. S3 API on `:8333`, path-style addressing. Allows CORS from `https://trace.playwright.dev`. Data is kept in the `s3-data` volume. |
 | `s3-init` | same | Runs once. Creates the bucket and sets its TTL (`S3_EVIDENCE_TTL`, default `14d`). Keep the TTL equal to `[evidence].retention_days`. |
-| `litellm`, `redis` | `ghcr.io/berriai/litellm:v1.77.7-stable`, `redis:7.4.6-bookworm` | Run only with `--profile agents`. They are the model gateway and its cache. |
+| `litellm`, `redis` | `ghcr.io/berriai/litellm:v1.82.3-stable`, `redis:7.4.6-bookworm` | Run only with `--profile agents`. They are the model gateway and its cache. |
 
 The evidence store is SeaweedFS, not MinIO, because MinIO no longer publishes its images on Docker Hub or Quay. guard's S3 adapter was checked against this SeaweedFS version with the live `guard-store` evidence test. Any S3-compatible store that supports path-style addressing works. To use one, change only `GUARD_STORAGE_URL`, which has the form `s3+https://<key>:<secret>@<host>/<bucket>`.
 
@@ -87,6 +99,7 @@ It is off by default. To turn it on:
    - `LITELLM_MASTER_KEY`
    - `REDIS_PASSWORD`
    - the provider keys you use: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `GEMINI_API_KEY`
+   - `CLAUDE_CODE_OAUTH_TOKEN` instead of `ANTHROPIC_API_KEY`, to bill a Claude Code subscription (see below)
    - `DOCKER_GID`, the host's docker group id (`getent group docker | cut -d: -f3`)
    - `GUARD_AGENT_WORK_DIR`
 4. Create the work directory on the host and give it to uid 10001: `sudo install -d -o 10001 -g 10001 "$GUARD_AGENT_WORK_DIR"`. The host engine resolves the sandboxes' bind mounts on the host, so the path must be the same on the host and in the container. The override mounts it at the same path. The checkout in `GUARD_REPO_DIR` must also be writable by uid 10001, because the lane writes under `.guard/agents/`.
@@ -98,6 +111,17 @@ It is off by default. To turn it on:
    ```
 
 Sandbox egress forwarders start on the `guard-gateway` network (`GUARD_SANDBOX_EGRESS_NETWORK`). Only `litellm` and `guard` are attached to it, so a sandbox can reach the gateway but not Postgres or the evidence store.
+
+### API key or Claude Code subscription
+
+The gateway reaches Anthropic with `ANTHROPIC_API_KEY`, or with a Claude Code subscription token in `CLAUDE_CODE_OAUTH_TOKEN` (the output of `claude setup-token`). When both are set, the subscription token is used. The token stays in the gateway container. A sandbox still holds only its virtual key.
+
+Read `docs/contracts/tokens.md`, "Anthropic credential", before you use a subscription:
+
+- Spend logs price subscription traffic at API list prices, so `budget_usd` and `daily_usd_cap` are notional caps.
+- The subscription's own quota applies on top of them.
+- The path has not been run against live Anthropic.
+- Anthropic's usage terms for the subscription are your responsibility.
 
 ### The Docker socket gives control of the host
 

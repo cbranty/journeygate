@@ -147,12 +147,30 @@ services:
   # The only model endpoint a sandbox can reach. Provider keys are passed
   # through by name from deploy/.env; deploy/litellm/config.yaml holds none.
   litellm:
-    image: ghcr.io/berriai/litellm:v1.77.7-stable
+    # The lowest LiteLLM release whose Anthropic adapter sends a configured
+    # Claude Code subscription token as `Authorization: Bearer`
+    # (docs/contracts/tokens.md, "Anthropic credential"). Keep it equal to the
+    # pin in docker-compose.dokploy.yml.
+    image: ghcr.io/berriai/litellm:v1.82.3-stable
     profiles: ["agents"]
     restart: unless-stopped
     # Compose interpolates every service even when its profile is off, so the
     # required keys of this profile are checked at container start, not ${:?}.
-    entrypoint: ["/bin/sh", "-c", 'test -n "$$LITELLM_MASTER_KEY" || { echo "set LITELLM_MASTER_KEY in deploy/.env" >&2; exit 1; }; exec docker/prod_entrypoint.sh "$$@"', "--"]
+    # CLAUDE_CODE_OAUTH_TOKEN, when set, replaces ANTHROPIC_API_KEY inside this
+    # container only, so the gateway bills the subscription and not the API key.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        test -n "$$LITELLM_MASTER_KEY" || { echo "set LITELLM_MASTER_KEY in deploy/.env" >&2; exit 1; }
+        if [ -n "$${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+          case "$$CLAUDE_CODE_OAUTH_TOKEN" in
+            sk-ant-oat*) export ANTHROPIC_API_KEY="$$CLAUDE_CODE_OAUTH_TOKEN" ;;
+            *) echo "CLAUDE_CODE_OAUTH_TOKEN must start with sk-ant-oat (the output of claude setup-token)" >&2; exit 1 ;;
+          esac
+        fi
+        exec docker/prod_entrypoint.sh "$$@"
+      - --
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     environment:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}
@@ -162,6 +180,7 @@ services:
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       ANTHROPIC_API_KEY:
+      CLAUDE_CODE_OAUTH_TOKEN:
       OPENAI_API_KEY:
       GEMINI_API_KEY:
       OTEL_EXPORTER_OTLP_ENDPOINT:
@@ -170,7 +189,8 @@ services:
       - ./litellm/config.yaml:/app/config.yaml:ro
     networks: [default, gateway]
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4000/health/liveliness"]
+      # python3, as in LiteLLM's own compose file: this image has no wget or curl.
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=4)"]
       interval: 10s
       timeout: 5s
       retries: 12
