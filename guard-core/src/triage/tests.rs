@@ -567,3 +567,57 @@ fn jira_labels_round_trip_through_human_label() {
     assert_eq!(human.flow_change, Some(true));
     assert_eq!(human.source, LabelSource::Manual);
 }
+
+#[test]
+fn start_statuses_match_case_insensitively() {
+    let list = vec!["In Development".to_string(), " Ready for Dev ".to_string()];
+    for status in [
+        "In Development",
+        "in development",
+        "IN DEVELOPMENT ",
+        "ready for dev",
+    ] {
+        assert!(is_start_status(&list, status), "{status:?}");
+    }
+    for status in ["In Dev", "Done", ""] {
+        assert!(!is_start_status(&list, status), "{status:?}");
+    }
+    // An empty list is the feature being off.
+    assert!(!is_start_status(&[], "In Development"));
+}
+
+#[test]
+fn labelled_areas_keeps_only_keys_of_the_config() {
+    let config = crate::config::parse_target(
+        r#"
+version = 1
+[app]
+name = "shop"
+base_url = "http://localhost:3000"
+[testability]
+roles = ["customer"]
+[areas.catalog]
+description = "Product catalog"
+paths = ["web/catalog/**"]
+[areas.checkout]
+description = "Checkout"
+paths = ["web/checkout/**"]
+"#,
+    )
+    .unwrap();
+    let labels = |l: &[&str]| -> Vec<String> { l.iter().map(|s| s.to_string()).collect() };
+    assert_eq!(
+        labelled_areas(
+            &labels(&[
+                "ux",
+                "area:checkout",
+                "area:unknown",
+                "area:catalog",
+                "area:checkout"
+            ]),
+            &config
+        ),
+        vec![Area::new("checkout"), Area::new("catalog")]
+    );
+    assert!(labelled_areas(&labels(&["area:", "area:Catalog", "catalog"]), &config).is_empty());
+}

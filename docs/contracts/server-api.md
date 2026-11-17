@@ -28,7 +28,7 @@ Secrets only come from the environment, never from files in the repo.
 | `DATABASE_URL` | `DecisionLog`, `GateHistory` (Postgres); with Postgres also the memory writers and the staleness job (below) | yes for triage and gate results |
 | `GUARD_STALENESS_INTERVAL` | memory staleness job period: `900`, `900s`, `15m`, `2h` (default 15 min; an unreadable value warns and keeps the default) | no |
 | `GUARD_STORAGE_URL` | `EvidenceStore` (format in finalize-phase2.md) | no |
-| `TYPESAFE_API_KEY`, `JEV_URL` | `DecisionEngine` | key yes for triage/impact |
+| `TYPESAFE_API_KEY`, `JEV_URL` | `DecisionEngine` | key yes for triage/impact (a move to a start status is triaged without it) |
 | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | `IssueTracker` | yes for Jira |
 | `JIRA_SUGGESTED_FIELD` | Shadow Mode suggestion field (e.g. `customfield_10123`) | no |
 | `GUARD_JIRA_WEBHOOK_SECRET` | `/webhooks/jira` | yes for that route |
@@ -44,11 +44,11 @@ For demos and end-to-end tests without a Jev key, a Jira site or a database. Nev
 | Variable | Effect |
 | --- | --- |
 | `GUARD_JEV_FAKE=1` | Deterministic engine: triage answers the first area option whose key the ticket text names (else the first option), kind `bugfix`, low risk, every Noul on the agent side of the default thresholds (confidence 0.9); impact is `0.9` when a changed path contains the journey's area (the id before the first `.`), else `0.05`. |
-| `GUARD_JIRA_FAKE=1` | In-memory Jira (`guard_core::ports::fakes::InMemoryTracker`). `/webhooks/jira` still requires `GUARD_JIRA_WEBHOOK_SECRET`; the delivered issue is stored so `get_issue` finds it. Bugs get keys `<PROJECT>-1001`, ... |
+| `GUARD_JIRA_FAKE=1` | In-memory Jira (`guard_core::ports::fakes::InMemoryTracker`). `/webhooks/jira` still requires `GUARD_JIRA_WEBHOOK_SECRET`; the delivered issue is stored so `get_issue` finds it, with the status of `issue.fields.status.name` (`To Do` when the payload has none). Bugs get keys `<PROJECT>-1001`, ... |
 | `DATABASE_URL=memory://` | `guard_store::MemoryStore` for `DecisionLog` and `GateHistory` (lost on exit). |
 | `GUARD_STORAGE_URL=file:///<dir>` | `guard_store::FsEvidenceStore` (not fake-only; also usable in CI-native mode). |
 
-Without `TYPESAFE_API_KEY` and without `GUARD_JEV_FAKE` the server still starts: every engine call fails with `EngineError::Unconfigured`, so triage records `engine_error` and goes to the human lane, and `/api/impact` answers `503`.
+Without `TYPESAFE_API_KEY` and without `GUARD_JEV_FAKE` the server still starts: every engine call fails with `EngineError::Unconfigured`, so `issue_created` triage records `engine_error` and goes to the human lane, and `/api/impact` answers `503`. The placeholder engine answers `DecisionEngine::is_configured() == false`; a move to a start status is then decided without an engine (see "Start on a status change" below).
 
 ### Agent lane (Phase 4)
 
@@ -118,9 +118,41 @@ pub async fn serve(options: ServeOptions, state: AppState) -> Result<(), ServeEr
 | --- | --- | --- |
 | `jira:issue_created` | Triage the issue in a background task (flow in `guard_core::triage` module docs): `get_issue` → `resolve_mentions` → `fan_out` → `triage` → `decide` → `record_decision` → `add_labels` (active) or `suggest_labels` (shadow). | `202 {"accepted": true, "event": "issue_created", "key": "SHOP-7"}` |
 | `jira:issue_updated` with a `labels` change by someone other than guard's own Jira user | `record_human_label(triage::human_label_from_labels(...))`. Label changes made by guard's API user come back as `Ignored` (the adapter compares `user.accountId` with `GET /rest/api/3/myself`), so guard's own writes never pollute the ground truth. | `202 {"accepted": true, "event": "labels_changed", "key": "SHOP-7"}` |
+| `jira:issue_updated` whose changelog moves the status to one of `[tracker].start_statuses`, by someone other than guard's own Jira user | Triage the issue in a background task, as `issue_created` does (details below). | `202 {"accepted": true, "event": "status_changed", "key": "SHOP-7"}` |
 | anything else | nothing | `200 {"accepted": false, "reason": "..."}` |
 
-Triage is idempotent per delivery only: a re-delivered `issue_created` triages again and records a second decision (the decision log is append-only; calibration reads the latest one per ticket).
+A delivery identical to the previous one for the same event and issue within 10 minutes is answered `200 {"accepted": false, "reason": "duplicate delivery of <event> for <key>"}` and not processed again (`guard_server::deliveries`). Outside that window a re-delivered `issue_created` triages again and records a second decision (the decision log is append-only; calibration reads the latest one per ticket).
+
+#### Start on a status change
+
+Moving a ticket to a listed status starts triage, so a team can create tickets freely and hand one to guard by moving it (for example to `In Development`). The feature is off until `[tracker].start_statuses` lists at least one status ([`target-toml.md`](target-toml.md)); without it a status change is answered `200 {"accepted": false, ...}` exactly as before.
+
+**What counts as the event**
+
+| Condition | Result |
+| --- | --- |
+| `changelog.items[]` has an item with `field` (or `fieldId`) `status` whose `toString` equals a listed name, ignoring case and surrounding whitespace | `status_changed` |
+| The same changelog also changes `labels` | Still `status_changed`; that delivery does not record a human label. |
+| The status is not listed | Handled as any other `issue_updated`: `labels_changed` when labels changed, otherwise ignored. |
+| `user.accountId` is guard's own Jira user | Ignored (`status change made by guard's own Jira user`). |
+| guard's own account id is not loaded yet | Ignored (fail closed), as label changes are. |
+| Same status and same `changelog.id` as the previous `status_changed` delivery of that issue, within 10 minutes | `200 {"accepted": false, "reason": "duplicate delivery of status_changed for SHOP-7"}`. A later move to the same status has another `changelog.id` and is triaged again; a payload without `changelog.id` is told apart by the status name only. |
+
+**What the server does**
+
+1. Reads the issue again (`get_issue`). If its current status is no longer listed, it stops: no decision, no label, no hand-off. The `202` was already sent.
+2. Decides the lane (table below).
+3. Records the decision with `"trigger": "status_change"` and applies it as `issue_created` does: labels first, then the agent-lane hand-off.
+
+| Decision engine | Lane |
+| --- | --- |
+| Configured and answering | `gatekeeper::decide`, the same rules as `issue_created`. |
+| Configured but failing, or the impact analysis failed | Human lane with `engine_unavailable`, as `issue_created`. |
+| Not configured (`DecisionEngine::is_configured() == false`) | `gatekeeper::decide_by_rules`: the hard rules (`hard_rule_path`, `schema_migration`, `fan_out_too_wide`) apply first. Then the ticket's own `area:<key>` labels are read: none naming a key of `[areas]` → human lane with `no_area_label`; one naming an area with `sensitive = true` → human lane with `sensitive_area`; otherwise the agent lane. guard never picks an area by itself. |
+
+Everything after the decision is unchanged: Shadow Mode only suggests labels and never reaches the agent lane, a decision the log refused is applied as the human lane, and the hard rules are never overridden. Without an engine the only label guard writes is `lane:agent` or `lane:human`.
+
+The agent-lane queue is unique per ticket only among queued or running tasks (`task_queue_active_pair_idx`): a ticket being worked is not enqueued twice, and once its tasks have finished a later move into a start status hands it off again.
 
 ### `POST /webhooks/github`
 

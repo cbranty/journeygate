@@ -52,7 +52,8 @@
     "kind": "jira",
     "project": "SHOP",
     "ticket_pattern": "SHOP-\\d+",
-    "require_ticket": "warn"
+    "require_ticket": "warn",
+    "start_statuses": ["In Development"]
   },
   "code_host": {
     "kind": "github"

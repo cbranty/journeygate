@@ -647,6 +647,36 @@ async fn load_self_account_id_401() {
 }
 
 #[tokio::test]
+async fn parse_webhook_maps_a_move_to_a_start_status() {
+    let server = MockServer::start().await;
+    let moved = fixture("webhook_issue_updated_status.json");
+    let delivery = webhook(&moved, Some("Bearer s3cret"), None);
+
+    let t = tracker(&server)
+        .with_self_account_id("5b10ac8d82e05b22cc7d4ef5")
+        .with_start_statuses(vec!["in development".into()]);
+    assert_eq!(
+        t.parse_webhook(&delivery).unwrap(),
+        TrackerEvent::StatusChanged {
+            key: "SHOP-7".into(),
+            status: "In Development".into(),
+            change_id: Some("10402".into()),
+        }
+    );
+    // The secret is still required.
+    assert!(t.parse_webhook(&webhook(&moved, None, None)).is_err());
+
+    // Without `[tracker].start_statuses` a status change is ignored, as before.
+    let off = tracker(&server).with_self_account_id("5b10ac8d82e05b22cc7d4ef5");
+    assert_eq!(
+        off.parse_webhook(&delivery).unwrap(),
+        TrackerEvent::Ignored {
+            reason: "issue updated without a labels change".into()
+        }
+    );
+}
+
+#[tokio::test]
 async fn parse_webhook_authenticates_and_maps_events() {
     let server = MockServer::start().await;
     let t = tracker(&server).with_self_account_id("5b10ac8d82e05b22cc7d4ef5");

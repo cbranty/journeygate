@@ -146,6 +146,9 @@ pub enum HumanReason {
     ChangesExistingFlow,
     EngineUnavailable,
     ShadowMode,
+    /// No decision engine is configured and the ticket has no `area:<key>`
+    /// label naming a key of `[areas]`: nothing says where an agent may write.
+    NoAreaLabel,
 }
 
 /// The Gatekeeper's routing decision.
@@ -420,6 +423,30 @@ pub struct AttachmentRef {
 
 // ---------------------------------------------------------------- decision log
 
+/// What started a triage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriageTrigger {
+    /// `jira:issue_created`. Also every decision stored before this field existed.
+    #[default]
+    IssueCreated,
+    /// `jira:issue_updated` moving the issue to one of `[tracker].start_statuses`.
+    StatusChange,
+}
+
+/// The part the decision engine played in a triage decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineUse {
+    /// The engine answered: `answers` is set.
+    Used,
+    /// A configured engine failed, or was not asked because the impact
+    /// analysis failed: `engine_error` has the cause.
+    Unavailable,
+    /// No engine is configured (`DecisionEngine::is_configured` is `false`).
+    NotConfigured,
+}
+
 /// One triage decision, recorded always (also in Shadow Mode and when the
 /// engine failed): it is the calibration dataset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -428,8 +455,15 @@ pub struct TriageDecision {
     /// RFC 3339 UTC (`YYYY-MM-DDTHH:MM:SSZ`).
     pub decided_at: String,
     pub mode: Mode,
+    /// Absent in the JSON of decisions stored before the field existed, which
+    /// were all started by `jira:issue_created`.
+    #[serde(default)]
+    pub trigger: TriageTrigger,
+    /// `None` only for decisions stored before the field existed.
+    #[serde(default)]
+    pub engine: Option<EngineUse>,
     pub state: TriageState,
-    /// `None` when the engine failed (then `engine_error` is set).
+    /// `None` when the engine did not answer (then `engine_error` is set).
     pub answers: Option<TriageAnswers>,
     pub engine_error: Option<String>,
     pub facts: ImpactFacts,

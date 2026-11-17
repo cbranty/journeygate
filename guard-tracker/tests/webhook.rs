@@ -1,7 +1,9 @@
 //! Jira webhook authentication and payload parsing (pure, no HTTP).
 
 use guard_core::ports::{TrackerEvent, TrackerWebhookError, WebhookRequest};
-use guard_tracker::webhook::{JiraWebhookEvent, authenticate, parse_payload, to_event};
+use guard_tracker::webhook::{
+    JiraWebhookEvent, authenticate, parse_payload, to_event, to_event_starting_on,
+};
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!(
@@ -253,5 +255,124 @@ fn only_label_families_the_human_changed_are_reported() {
             key: "SHOP-9".into(),
             labels: vec!["ux".into()]
         }
+    );
+}
+
+// ------------------------------------------------------- start statuses
+//
+// `webhook_issue_updated_status.json` follows the changelog item Jira Cloud
+// documents for a status change (`field`/`fieldId` `status`, `from`/`to` ids,
+// `fromString`/`toString` names). It was written from that documented format,
+// not recorded from a live site.
+
+fn start_statuses(names: &[&str]) -> Vec<String> {
+    names.iter().map(|n| n.to_string()).collect()
+}
+
+fn status_changed(status: &str, change_id: Option<&str>) -> TrackerEvent {
+    TrackerEvent::StatusChanged {
+        key: "SHOP-7".into(),
+        status: status.into(),
+        change_id: change_id.map(Into::into),
+    }
+}
+
+#[test]
+fn a_move_to_a_start_status_maps_to_status_changed() {
+    let hook = parse_payload(&fixture("webhook_issue_updated_status.json"), None).unwrap();
+    assert_eq!(hook.status_changed_to.as_deref(), Some("In Development"));
+    assert_eq!(hook.change_id.as_deref(), Some("10402"));
+    assert!(!hook.labels_changed);
+    let ticket = hook.ticket.as_ref().unwrap();
+    assert_eq!(ticket.status.as_deref(), Some("In Development"));
+
+    // Status names are compared case-insensitively.
+    for listed in ["In Development", "in development", " IN DEVELOPMENT "] {
+        assert_eq!(
+            to_event_starting_on(&hook, Some("bot"), &start_statuses(&["Ready", listed])),
+            status_changed("In Development", Some("10402")),
+            "{listed:?}"
+        );
+    }
+
+    // A changelog that also changes labels still starts the triage.
+    let body = br#"{"webhookEvent":"jira:issue_updated","user":{"accountId":"h"},
+        "issue":{"key":"SHOP-7","fields":{"summary":"s","labels":["ux"]}},
+        "changelog":{"id":10403,"items":[
+          {"field":"labels","fromString":"","toString":"ux"},
+          {"field":"status","fromString":"To Do","toString":"In Development"}]}}"#;
+    let both = parse_payload(body, None).unwrap();
+    assert_eq!(
+        to_event_starting_on(&both, Some("bot"), &start_statuses(&["In Development"])),
+        status_changed("In Development", Some("10403"))
+    );
+}
+
+#[test]
+fn a_status_change_by_guard_or_with_an_unknown_account_is_ignored() {
+    let hook = parse_payload(&fixture("webhook_issue_updated_status.json"), None).unwrap();
+    let listed = start_statuses(&["In Development"]);
+    match to_event_starting_on(&hook, Some("557058:human-reporter"), &listed) {
+        TrackerEvent::Ignored { reason } => {
+            assert_eq!(reason, "status change made by guard's own Jira user")
+        }
+        other => panic!("{other:?}"),
+    }
+    // Unknown own account: fail closed (guard's own moves cannot be told apart).
+    match to_event_starting_on(&hook, None, &listed) {
+        TrackerEvent::Ignored { reason } => {
+            assert_eq!(reason, "guard's own Jira account id is not loaded")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn without_a_listed_status_issue_updated_maps_as_before() {
+    let unchanged = "issue updated without a labels change";
+    let ignored = |event: TrackerEvent| match event {
+        TrackerEvent::Ignored { reason } => reason,
+        other => panic!("{other:?}"),
+    };
+    let status = parse_payload(&fixture("webhook_issue_updated_status.json"), None).unwrap();
+    // The feature is off: no list, or an empty one.
+    assert_eq!(ignored(to_event(&status, Some("bot"))), unchanged);
+    assert_eq!(
+        ignored(to_event_starting_on(&status, Some("bot"), &[])),
+        unchanged
+    );
+    // The feature is on, but the issue moved to another status.
+    let listed = start_statuses(&["Ready for Dev"]);
+    assert_eq!(
+        ignored(to_event_starting_on(&status, Some("bot"), &listed)),
+        unchanged
+    );
+
+    // Neither labels nor a status: ignored with the same reason.
+    let listed = start_statuses(&["In Development"]);
+    let summary = parse_payload(&fixture("webhook_issue_updated_summary.json"), None).unwrap();
+    assert_eq!(summary.status_changed_to, None);
+    assert_eq!(
+        ignored(to_event_starting_on(&summary, Some("bot"), &listed)),
+        unchanged
+    );
+
+    // Label changes keep recording the human label, whoever lists statuses.
+    let labels = parse_payload(&fixture("webhook_issue_updated_labels.json"), None).unwrap();
+    assert_eq!(
+        to_event_starting_on(&labels, Some("bot"), &listed),
+        to_event(&labels, Some("bot"))
+    );
+    assert!(matches!(
+        to_event(&labels, Some("bot")),
+        TrackerEvent::LabelsChanged { .. }
+    ));
+    assert_eq!(
+        ignored(to_event_starting_on(
+            &labels,
+            Some("557058:human-reporter"),
+            &listed
+        )),
+        "label change made by guard's own Jira user"
     );
 }

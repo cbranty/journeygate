@@ -10,17 +10,26 @@
 //! that still applies), and a decision that could not be recorded in the
 //! decision log is never applied as the agent lane.
 //!
+//! Two webhook events start it: `issue_created` ([`triage_ticket`]) and a
+//! move to one of `[tracker].start_statuses` ([`triage_status_change`]). The
+//! flow is the same; the trigger is recorded in the decision. The one
+//! difference: on a server without a decision engine, a status change is
+//! decided on the hard rules and the ticket's own `area:<key>` label
+//! (`gatekeeper::decide_by_rules`) instead of failing closed. A configured
+//! engine that fails still routes to the human lane.
+//!
 //! Phase 4: an audited lane-A ticket in active mode is handed to the
 //! [`AgentLane`] (the QA + Coder queue). Shadow Mode, the human lane and an
 //! unrecorded decision never reach it. A failed hand-off is logged and leaves
 //! the ticket to humans (fail closed); it does not fail the webhook.
 
 use crate::AppState;
-use guard_core::gatekeeper::{GateRules, decide, decide_without_engine};
+use guard_core::gatekeeper::{GateRules, decide, decide_by_rules, decide_without_engine};
 use guard_core::ports::{
-    AreaOption, DecisionId, ImpactFacts, Issue, LabelSource, Lane, StoreError, TrackerError,
-    TriageAnswers, TriageDecision, TriageRequest,
+    AreaOption, DecisionId, DecisionLog, EngineUse, ImpactFacts, Issue, IssueTracker, LabelSource,
+    Lane, StoreError, TrackerError, TriageAnswers, TriageDecision, TriageRequest, TriageTrigger,
 };
+use std::sync::Arc;
 
 /// Where audited lane-A tickets go in active mode (guard-cli wires the
 /// `guard-agents` queue here). Enqueueing must be idempotent per ticket.
@@ -35,7 +44,8 @@ pub trait AgentLane: Send + Sync {
     ) -> Result<(), String>;
 }
 use guard_core::triage::{
-    build_state, effective_lane, human_label_from_labels, jira_labels, mentioned_modules,
+    build_state, effective_lane, human_label_from_labels, is_start_status, jira_labels,
+    labelled_areas, mentioned_modules,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,18 +93,75 @@ async fn facts_for(state: &AppState, modules: Vec<String>) -> Result<ImpactFacts
     .unwrap_or_else(|e| Err(format!("impact task failed: {e}")))
 }
 
-/// Triages one Jira issue end to end.
+/// The two optional ports triage cannot work without.
+struct Ports {
+    tracker: Arc<dyn IssueTracker>,
+    log: Arc<dyn DecisionLog>,
+}
+
+impl Ports {
+    fn of(state: &AppState) -> Result<Self, TriageError> {
+        Ok(Self {
+            tracker: state
+                .tracker
+                .clone()
+                .ok_or(TriageError::NotConfigured("issue tracker"))?,
+            log: state
+                .decisions
+                .clone()
+                .ok_or(TriageError::NotConfigured("decision log"))?,
+        })
+    }
+}
+
+/// Triages one Jira issue end to end (`issue_created`).
 pub async fn triage_ticket(state: &AppState, key: &str) -> Result<TriageOutcome, TriageError> {
-    let tracker = state
+    let ports = Ports::of(state)?;
+    let issue = ports.tracker.get_issue(key).await?;
+    decide_and_apply(state, &ports, key, &issue, TriageTrigger::IssueCreated).await
+}
+
+/// `status_changed`: triages an issue that was moved to one of
+/// `[tracker].start_statuses`.
+///
+/// The webhook is not trusted for the status: the issue is read again and the
+/// triage runs only while its current status is still listed. `Ok(None)` when
+/// it is not (the issue moved on before the delivery was processed): nothing
+/// is decided, recorded or labelled.
+pub async fn triage_status_change(
+    state: &AppState,
+    key: &str,
+) -> Result<Option<TriageOutcome>, TriageError> {
+    let ports = Ports::of(state)?;
+    let issue = ports.tracker.get_issue(key).await?;
+    let start_statuses = state
+        .config
         .tracker
-        .clone()
-        .ok_or(TriageError::NotConfigured("issue tracker"))?;
-    let log = state
-        .decisions
-        .clone()
-        .ok_or(TriageError::NotConfigured("decision log"))?;
-    let issue = tracker.get_issue(key).await?;
-    let modules = mentioned_modules(&issue);
+        .as_ref()
+        .map_or(&[][..], |tracker| tracker.start_statuses.as_slice());
+    if !is_start_status(start_statuses, &issue.status) {
+        tracing::info!(
+            ticket = key,
+            status = %issue.status,
+            "status change ignored: the issue is no longer in a start status"
+        );
+        return Ok(None);
+    }
+    decide_and_apply(state, &ports, key, &issue, TriageTrigger::StatusChange)
+        .await
+        .map(Some)
+}
+
+/// Decides the lane of `issue`, records the decision and applies it.
+async fn decide_and_apply(
+    state: &AppState,
+    ports: &Ports,
+    key: &str,
+    issue: &Issue,
+    trigger: TriageTrigger,
+) -> Result<TriageOutcome, TriageError> {
+    let Ports { tracker, log } = ports;
+    let modules = mentioned_modules(issue);
     let rules = GateRules::from_config(&state.config);
     let mode = state.thresholds.mode;
 
@@ -105,7 +172,8 @@ pub async fn triage_ticket(state: &AppState, key: &str) -> Result<TriageOutcome,
             Some(format!("impact analysis failed: {err}")),
         ),
     };
-    let triage_state = build_state(&issue, modules, facts.blast_radius());
+    let facts_known = impact_error.is_none();
+    let triage_state = build_state(issue, modules, facts.blast_radius());
 
     let (answers, engine_error): (Option<TriageAnswers>, Option<String>) = match impact_error {
         // Without facts the hard rules cannot be checked: never ask the engine.
@@ -123,8 +191,24 @@ pub async fn triage_ticket(state: &AppState, key: &str) -> Result<TriageOutcome,
             }
         }
     };
+    let engine = match (&answers, state.engine.is_configured()) {
+        (Some(_), _) => EngineUse::Used,
+        (None, true) => EngineUse::Unavailable,
+        (None, false) => EngineUse::NotConfigured,
+    };
+    // A status change on a server without an engine is decided on the hard
+    // rules and the ticket's own area label. Every other case without answers
+    // (a configured engine that failed, unknown facts, `issue_created`) fails
+    // closed into the human lane.
+    let rules_only =
+        trigger == TriageTrigger::StatusChange && engine == EngineUse::NotConfigured && facts_known;
     let decided = match &answers {
         Some(answers) => decide(answers, &facts, &state.thresholds, &rules),
+        None if rules_only => decide_by_rules(
+            &facts,
+            &rules,
+            &labelled_areas(&issue.labels, &state.config),
+        ),
         None => decide_without_engine(&facts, &rules),
     };
     let effective = effective_lane(&decided, mode);
@@ -133,6 +217,8 @@ pub async fn triage_ticket(state: &AppState, key: &str) -> Result<TriageOutcome,
         ticket_key: key.to_string(),
         decided_at: state.clock.now_rfc3339(),
         mode,
+        trigger,
+        engine: Some(engine),
         state: triage_state,
         answers: answers.clone(),
         engine_error,
@@ -168,14 +254,20 @@ pub async fn triage_ticket(state: &AppState, key: &str) -> Result<TriageOutcome,
     } else {
         tracker.add_labels(key, &labels).await?;
     }
-    tracing::info!(ticket = key, ?decided, ?effective, "ticket triaged");
+    tracing::info!(
+        ticket = key,
+        ?trigger,
+        ?decided,
+        ?effective,
+        "ticket triaged"
+    );
     if let (Some(lane), Some(id), true, false) = (
         &state.agent_lane,
         decision_id,
         effective.is_agent(),
         mode.is_shadow(),
     ) {
-        match lane.enqueue(&issue, id, &labels).await {
+        match lane.enqueue(issue, id, &labels).await {
             Ok(()) => tracing::info!(ticket = key, "lane-A ticket queued for QA + Coder"),
             Err(err) => tracing::error!(
                 ticket = key,

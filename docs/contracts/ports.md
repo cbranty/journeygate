@@ -24,8 +24,8 @@ Index of the shared interfaces. The traits and types live in `guard-core/src/por
 
 | Trait | Methods | Async | Error |
 | --- | --- | --- | --- |
-| `DecisionEngine` | `model`, `triage(&TriageRequest) -> TriageAnswers`, `impact(&DiffSummary, &[JourneyQuestion]) -> BTreeMap<id, f64>` | yes | `EngineError` |
-| `IssueTracker` | `find_by_label`, `create_bug`, `comment_adf`, `attach_file`, `add_labels`, `suggest_labels`, `get_issue`, `parse_webhook` (sync) | yes | `TrackerError`, `TrackerWebhookError` |
+| `DecisionEngine` | `model`, `is_configured` (sync, default `true`; `false` only for the placeholder of a server without an engine), `triage(&TriageRequest) -> TriageAnswers`, `impact(&DiffSummary, &[JourneyQuestion]) -> BTreeMap<id, f64>` | yes | `EngineError` |
+| `IssueTracker` | `find_by_label`, `create_bug`, `comment_adf`, `attach_file`, `add_labels`, `suggest_labels`, `get_issue`, `parse_webhook` (sync) -> `TrackerEvent` (`IssueCreated`, `LabelsChanged`, `StatusChanged { key, status, change_id }`, `Ignored`) | yes | `TrackerError`, `TrackerWebhookError` |
 | `CodeHost` | `provider`, `pr_context(PrRef, Option<&Regex>) -> PrContext`, `publish_status(&GateStatus)`, `comment_pr(PrRef, &str)` (upsert by marker), `verify_webhook` (sync), `parse_webhook` (sync) | yes | `CodeHostError`, `WebhookError` |
 | `code_host::PullRequestPublisher` | `provider`, `push_branch(&BranchPush) -> PushedBranch` (force-push to `agent/<KEY>` only), `open_pull_request(&AgentPullRequest) -> OpenedPullRequest` (idempotent per `agent/<KEY>`, draft by default, label `agent`, never merges); see [`pr-publisher.md`](pr-publisher.md) | yes | `CodeHostError` |
 | `DecisionLog` | `record_decision`, `record_human_label`, `list_for_calibration` | yes | `StoreError` |
@@ -43,7 +43,7 @@ All traits are `Send + Sync` and object-safe (`Arc<dyn Trait>`), async via `asyn
 
 ### Fakes
 
-`guard_core::ports::fakes` (feature `fakes`): `FakeDecisionEngine`, `InMemoryTracker`, `FakeCodeHost` (webhook token header `x-guard-fake-token`, bodies are `CodeHostEvent` JSON), `InMemoryStore` (`DecisionLog` + `GateHistory`), `InMemoryEvidenceStore` (`memory://evidence/<key>?expires=<s>` URLs), `FakeImpactAnalyzer`. Phase 4: `FakeAgentRuntime` (scripted outcomes, validates tasks, `completed(summary, cost)`), `FakeSandboxProvider` (validates specs; `with_exec`, `with_diff`, `exec_log`, `is_destroyed`), `FakeModelGateway` (`sk-fake-<n>` tokens, `push_spend`, `is_active`, `minted`), `InMemoryTaskQueue` (shared queue semantics, `expire_leases`), `InMemoryMemoryFacts` (writer + `reader()` read-only view). Use them for use-case and server tests; adapters test their HTTP behavior against wiremock.
+`guard_core::ports::fakes` (feature `fakes`): `FakeDecisionEngine` (`not_configured()` models a server without an engine), `InMemoryTracker` (`with_start_statuses`), `FakeCodeHost` (webhook token header `x-guard-fake-token`, bodies are `CodeHostEvent` JSON), `InMemoryStore` (`DecisionLog` + `GateHistory`), `InMemoryEvidenceStore` (`memory://evidence/<key>?expires=<s>` URLs), `FakeImpactAnalyzer`. Phase 4: `FakeAgentRuntime` (scripted outcomes, validates tasks, `completed(summary, cost)`), `FakeSandboxProvider` (validates specs; `with_exec`, `with_diff`, `exec_log`, `is_destroyed`), `FakeModelGateway` (`sk-fake-<n>` tokens, `push_spend`, `is_active`, `minted`), `InMemoryTaskQueue` (shared queue semantics, `expire_leases`), `InMemoryMemoryFacts` (writer + `reader()` read-only view). Use them for use-case and server tests; adapters test their HTTP behavior against wiremock.
 
 ## Domain stubs to fill (core-domain builder)
 
@@ -52,8 +52,8 @@ Signatures, doc comments and contracts are final; bodies are `todo!()`:
 | Module | Functions |
 | --- | --- |
 | `thresholds` | `parse_thresholds`, `validate` |
-| `gatekeeper` | `GateRules::from_config`, `decide`, `decide_without_engine` |
-| `triage` | `strip_markup`, `extract_acceptance_criteria`, `mentioned_modules`, `build_state`, `effective_lane`, `jira_labels`, `human_label_from_labels` |
+| `gatekeeper` | `GateRules::from_config`, `decide`, `decide_without_engine`, `decide_by_rules` (a status change on a server without an engine) |
+| `triage` | `strip_markup`, `extract_acceptance_criteria`, `mentioned_modules`, `build_state`, `effective_lane`, `jira_labels`, `human_label_from_labels`, `is_start_status`, `labelled_areas` |
 | `journey_changes` | `review` |
 | `fingerprint` | `normalize_error`, `fingerprint`, `from_label` |
 

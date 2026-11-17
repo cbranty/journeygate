@@ -2306,6 +2306,100 @@ fn serve_in_fake_mode_triages_webhooks_and_receives_gate_results() {
     drop(server);
 }
 
+/// `jira:issue_updated` moving `key` to `In Development`, by a human.
+fn moved_to_development(key: &str, labels: &str) -> String {
+    format!(
+        r#"{{"webhookEvent": "jira:issue_updated", "user": {{"accountId": "human"}},
+            "issue": {{"key": "{key}", "fields": {{"summary": "Fix the cart total",
+              "status": {{"name": "In Development"}}, "labels": [{labels}]}}}},
+            "changelog": {{"id": "10402", "items": [
+              {{"field": "status", "fromString": "To Do", "toString": "In Development"}}]}}}}"#
+    )
+}
+
+#[test]
+fn serve_without_an_engine_triages_a_ticket_moved_to_a_start_status() {
+    let dir = repo_with_app(free_port());
+    let root = dir.path();
+    let target = fs::read_to_string(root.join("target.toml"))
+        .unwrap()
+        .replace(
+            "kind = \"jira\"",
+            "kind = \"jira\"\nproject = \"SHOP\"\nstart_statuses = [\"In Development\"]",
+        );
+    write(root, "target.toml", &target);
+    git(root, &["commit", "-q", "-am", "project"]);
+
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let mut cmd = StdCommand::new(assert_cmd::cargo::cargo_bin("guard"));
+    for var in LEAKY_ENV {
+        cmd.env_remove(var);
+    }
+    cmd.env("GUARD_CREDENTIALS_FILE", NO_CREDENTIALS);
+    // No `--fake`, no TYPESAFE_API_KEY and no GUARD_JEV_FAKE: no decision engine.
+    let _server = Running(
+        cmd.args(["serve", "--listen", &format!("127.0.0.1:{port}")])
+            .current_dir(root)
+            .env("GUARD_SERVER_TOKEN", "srv-token")
+            .env("GUARD_JIRA_WEBHOOK_SECRET", "hook-secret")
+            .env("GUARD_JIRA_FAKE", "1")
+            .env("DATABASE_URL", "memory://")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_until(
+        || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok(),
+        "guard serve",
+    );
+
+    let headers = [
+        ("Authorization", "Bearer hook-secret"),
+        ("Content-Type", "application/json"),
+    ];
+    // SHOP-7 names an area of target.toml; SHOP-8 names none.
+    for (key, labels) in [("SHOP-7", r#""area:checkout""#), ("SHOP-8", r#""ux""#)] {
+        let (status, body) = http(
+            &base,
+            "POST",
+            "/webhooks/jira",
+            &headers,
+            &moved_to_development(key, labels),
+        );
+        assert_eq!(status, 202, "{body}");
+        assert!(body.contains("\"event\":\"status_changed\""), "{body}");
+        assert!(body.contains(key), "{body}");
+    }
+
+    let row = |page: &str, key: &str| {
+        page.split("<tr>")
+            .find(|row| row.contains(&format!("<td>{key}</td>")))
+            .map(str::to_string)
+    };
+    wait_until(
+        || {
+            let page = http(&base, "GET", "/decisions", &[], "").1;
+            row(&page, "SHOP-7").is_some() && row(&page, "SHOP-8").is_some()
+        },
+        "both triage decisions",
+    );
+    let page = http(&base, "GET", "/decisions", &[], "").1;
+    // Decided for the agent lane without an engine; Shadow Mode (the default
+    // thresholds) keeps it with humans.
+    let labelled = row(&page, "SHOP-7").unwrap();
+    assert!(
+        labelled.contains("<td>agent</td><td>human (shadow_mode)</td>"),
+        "{labelled}"
+    );
+    let unlabelled = row(&page, "SHOP-8").unwrap();
+    assert!(
+        unlabelled.contains("<td>human (no_area_label)</td>"),
+        "{unlabelled}"
+    );
+}
+
 #[test]
 fn mcp_serves_the_guard_tools_over_stdio() {
     let dir = repo();

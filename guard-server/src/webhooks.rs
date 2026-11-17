@@ -5,7 +5,7 @@ use crate::AppState;
 use crate::body::{SMALL_LIMIT, read_limited, webhook_request};
 use crate::deliveries::with_retries;
 use crate::error::ApiError;
-use crate::triage::{record_labels, triage_ticket};
+use crate::triage::{record_labels, triage_status_change, triage_ticket};
 use axum::Json;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -61,6 +61,22 @@ pub async fn jira(
             format!("labels_changed:{key}"),
             labels.join(" "),
         ),
+        TrackerEvent::StatusChanged {
+            key,
+            status,
+            change_id,
+        } => (
+            "status_changed",
+            key.clone(),
+            format!("status_changed:{key}"),
+            // Without a change id, two moves to the same status inside the
+            // dedupe window cannot be told apart from a redelivery.
+            format!(
+                "{}#{}",
+                status.trim().to_lowercase(),
+                change_id.as_deref().unwrap_or_default()
+            ),
+        ),
         TrackerEvent::Ignored { reason } => return Ok(not_accepted(reason.clone())),
     };
     if state.decisions.is_none() {
@@ -81,6 +97,9 @@ pub async fn jira(
                 }
                 TrackerEvent::LabelsChanged { key, labels } => {
                     record_labels(&task_state, key, labels).await
+                }
+                TrackerEvent::StatusChanged { key, .. } => {
+                    triage_status_change(&task_state, key).await.map(|_| ())
                 }
                 TrackerEvent::Ignored { .. } => Ok(()),
             }

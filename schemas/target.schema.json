@@ -112,7 +112,14 @@
         "kind": { "enum": ["jira"] },
         "project": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
         "ticket_pattern": { "type": "string", "minLength": 1, "description": "Regex (Rust `regex` syntax) matched against the branch name; the first match is the ticket key." },
-        "require_ticket": { "enum": ["warn", "block"], "default": "warn" }
+        "require_ticket": { "enum": ["warn", "block"], "default": "warn" },
+        "start_statuses": {
+          "description": "Jira status names. Moving an issue to one of them starts triage in guard serve. Compared case-insensitively. Absent or empty: the feature is off.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "\\S" },
+          "uniqueItems": true,
+          "default": []
+        }
       }
     },
     "code_host": {

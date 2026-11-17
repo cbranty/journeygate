@@ -138,6 +138,57 @@ impl Fakes {
     }
 }
 
+pub fn active(mut state: AppState) -> AppState {
+    state.thresholds.mode = guard_core::thresholds::Mode::Active;
+    state
+}
+
+/// A decision log that is down: every call fails.
+pub struct DownLog;
+
+#[async_trait::async_trait]
+impl DecisionLog for DownLog {
+    async fn record_decision(&self, _: &TriageDecision) -> Result<DecisionId, StoreError> {
+        Err(StoreError::Unavailable("connection refused".into()))
+    }
+    async fn record_human_label(&self, _: &HumanLabel) -> Result<(), StoreError> {
+        Err(StoreError::Unavailable("connection refused".into()))
+    }
+    async fn list_for_calibration(
+        &self,
+        _: &CalibrationQuery,
+    ) -> Result<Vec<CalibrationRow>, StoreError> {
+        Err(StoreError::Unavailable("connection refused".into()))
+    }
+}
+
+/// An agent lane that records every hand-off.
+#[derive(Default)]
+pub struct RecordingLane {
+    pub calls: std::sync::Mutex<Vec<(String, DecisionId, Vec<String>)>>,
+}
+
+#[async_trait::async_trait]
+impl guard_server::AgentLane for RecordingLane {
+    async fn enqueue(
+        &self,
+        issue: &Issue,
+        decision: DecisionId,
+        labels: &[String],
+    ) -> Result<(), String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((issue.key.clone(), decision, labels.to_vec()));
+        Ok(())
+    }
+}
+
+pub fn with_lane(state: AppState) -> (AppState, Arc<RecordingLane>) {
+    let lane = Arc::new(RecordingLane::default());
+    (state.with_agent_lane(lane.clone()), lane)
+}
+
 /// `InMemoryTracker` plus the Jira webhook authentication of the contract:
 /// `Authorization: Bearer <secret>` or `?secret=<secret>`.
 pub struct SecretTracker {

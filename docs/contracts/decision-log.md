@@ -31,7 +31,28 @@ The decision log is the calibration dataset of section 6: every triage decision 
 | `clear_e2e_criteria`, `touches_money_or_security`, `agent_suitable`, `changes_existing_flow` | `float8` | the Noul answers |
 | `decision` | `jsonb` | the whole `TriageDecision` serialized with serde (source of truth; the columns are denormalized copies) |
 
-Checks: answers columns are all NULL exactly when the engine failed; `engine_model` or `engine_error` is set.
+Checks: answers columns are all NULL exactly when the engine did not answer (it failed, was not asked, or is not configured); `engine_model` or `engine_error` is set.
+
+#### What started a decision, and the engine's part in it
+
+Two fields of the `decision` JSON say how a decision came about. They have no column of their own: no migration was needed and none is required to read them.
+
+| JSON field | Values | Meaning |
+| --- | --- | --- |
+| `trigger` | `"issue_created"` \| `"status_change"` | What started the triage. `status_change` is a move to one of `[tracker].start_statuses` ([`server-api.md`](server-api.md), "Start on a status change"). |
+| `engine` | `"used"` \| `"unavailable"` \| `"not_configured"` | `used`: the engine answered (`answers` is set). `unavailable`: a configured engine failed, or was not asked because the impact analysis failed. `not_configured`: no engine is configured; `engine_error` says so. |
+
+Rows written before these fields existed keep reading: a missing `trigger` is `issue_created` (the only trigger then) and a missing `engine` is `null`, in which case `answers` and `engine_error` tell the same story as before.
+
+```sql
+-- Decisions started by a status change and taken without an engine.
+SELECT ticket_key, decided_at, decided_lane, decided_reasons
+FROM triage_decisions
+WHERE decision->>'trigger' = 'status_change'
+  AND decision->>'engine' = 'not_configured';
+```
+
+A status change decided without an engine can end in the agent lane with `answers` NULL. Its human-lane reason, when the ticket has no usable area label, is `no_area_label` in `decided_reasons`.
 
 ### `human_labels` (append-only)
 

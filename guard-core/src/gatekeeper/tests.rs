@@ -497,6 +497,81 @@ fn decide_without_engine_table() {
     }
 }
 
+#[test]
+fn decide_by_rules_table() {
+    let areas = |keys: &[&str]| -> Vec<Area> { keys.iter().map(|k| Area::new(*k)).collect() };
+    let none = ImpactFacts::default();
+    let path = ImpactFacts {
+        human_only_path_hit: true,
+        ..ImpactFacts::default()
+    };
+    let migration = ImpactFacts {
+        schema_migration: true,
+        ..ImpactFacts::default()
+    };
+    let wide = ImpactFacts {
+        max_fan_out: 11,
+        ..ImpactFacts::default()
+    };
+    let at_limit = ImpactFacts {
+        max_fan_out: 10,
+        ..ImpactFacts::default()
+    };
+    let cases: Vec<(&str, &ImpactFacts, Vec<Area>, Lane)> = vec![
+        ("labelled area", &none, areas(&["catalog"]), Lane::Agent),
+        (
+            "fan-out at the limit",
+            &at_limit,
+            areas(&["catalog"]),
+            Lane::Agent,
+        ),
+        ("no area label", &none, areas(&[]), human(&[NoAreaLabel])),
+        (
+            "sensitive area",
+            &none,
+            areas(&["checkout"]),
+            human(&[SensitiveArea]),
+        ),
+        (
+            "one sensitive area among several",
+            &none,
+            areas(&["catalog", "auth"]),
+            human(&[SensitiveArea]),
+        ),
+        (
+            "human-only path",
+            &path,
+            areas(&["catalog"]),
+            human(&[HardRulePath]),
+        ),
+        (
+            "schema migration",
+            &migration,
+            areas(&["catalog"]),
+            human(&[SchemaMigration]),
+        ),
+        (
+            "fan-out too wide",
+            &wide,
+            areas(&["catalog"]),
+            human(&[FanOutTooWide]),
+        ),
+        (
+            "hard rule and no area label",
+            &path,
+            areas(&[]),
+            human(&[HardRulePath, NoAreaLabel]),
+        ),
+    ];
+    for (name, facts, ticket_areas, expected) in cases {
+        assert_eq!(
+            decide_by_rules(facts, &rules(), &ticket_areas),
+            expected,
+            "{name}"
+        );
+    }
+}
+
 const TARGET: &str = r#"
 version = 1
 [app]

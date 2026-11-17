@@ -46,11 +46,21 @@ pub struct FakeDecisionEngine {
     impact: BTreeMap<String, f64>,
     impact_error: Option<EngineError>,
     impact_calls: Mutex<usize>,
+    not_configured: bool,
 }
 
 impl FakeDecisionEngine {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The placeholder of a server without an engine: `is_configured` is
+    /// `false` and every `triage` call fails with `EngineError::Unconfigured`.
+    pub fn not_configured() -> Self {
+        Self {
+            not_configured: true,
+            ..Self::default()
+        }
     }
 
     /// Queues the result of the next `triage` call.
@@ -86,8 +96,17 @@ impl DecisionEngine for FakeDecisionEngine {
         FAKE_MODEL
     }
 
+    fn is_configured(&self) -> bool {
+        !self.not_configured
+    }
+
     async fn triage(&self, request: &TriageRequest) -> Result<TriageAnswers, EngineError> {
         lock(&self.triage_requests).push(request.clone());
+        if self.not_configured {
+            return Err(EngineError::Unconfigured(
+                "FakeDecisionEngine: no engine configured".into(),
+            ));
+        }
         lock(&self.triage).pop_front().unwrap_or_else(|| {
             Err(EngineError::Unconfigured(
                 "FakeDecisionEngine: no scripted triage answer".into(),
@@ -131,6 +150,7 @@ struct TrackerState {
 /// In-memory Jira. Created Bugs get keys `<PROJECT>-1001`, `-1002`, ...
 pub struct InMemoryTracker {
     project: String,
+    start_statuses: Vec<String>,
     state: Mutex<TrackerState>,
 }
 
@@ -138,11 +158,19 @@ impl InMemoryTracker {
     pub fn new(project: &str) -> Self {
         Self {
             project: project.to_string(),
+            start_statuses: Vec::new(),
             state: Mutex::new(TrackerState {
                 next_number: 1001,
                 ..TrackerState::default()
             }),
         }
+    }
+
+    /// `[tracker].start_statuses`: a status change to one of them parses to
+    /// `TrackerEvent::StatusChanged`. Empty (the default): never.
+    pub fn with_start_statuses(mut self, statuses: &[&str]) -> Self {
+        self.start_statuses = statuses.iter().map(|s| s.to_string()).collect();
+        self
     }
 
     /// Seeds an existing issue (e.g. the change ticket).
@@ -292,7 +320,8 @@ impl IssueTracker for InMemoryTracker {
     }
 
     /// No authentication; parses the Jira webhook JSON shape
-    /// (`webhookEvent`, `issue.key`, `issue.fields.labels`, `changelog.items[].field`).
+    /// (`webhookEvent`, `issue.key`, `issue.fields.labels`, `changelog.id`,
+    /// `changelog.items[].field` and, for a `status` item, its `toString`).
     fn parse_webhook(&self, request: &WebhookRequest) -> Result<TrackerEvent, TrackerWebhookError> {
         let v: serde_json::Value = serde_json::from_slice(&request.body)
             .map_err(|e| TrackerWebhookError::Malformed(e.to_string()))?;
@@ -301,9 +330,22 @@ impl IssueTracker for InMemoryTracker {
         match (event, key) {
             ("jira:issue_created", Some(key)) => Ok(TrackerEvent::IssueCreated { key }),
             ("jira:issue_updated", Some(key)) => {
-                let labels_changed = v["changelog"]["items"]
-                    .as_array()
-                    .is_some_and(|items| items.iter().any(|i| i["field"] == "labels"));
+                let items = v["changelog"]["items"].as_array();
+                let started = items
+                    .into_iter()
+                    .flatten()
+                    .filter(|i| i["field"] == "status")
+                    .filter_map(|i| i["toString"].as_str())
+                    .find(|to| crate::triage::is_start_status(&self.start_statuses, to));
+                if let Some(status) = started {
+                    return Ok(TrackerEvent::StatusChanged {
+                        key,
+                        status: status.to_string(),
+                        change_id: v["changelog"]["id"].as_str().map(str::to_string),
+                    });
+                }
+                let labels_changed =
+                    items.is_some_and(|items| items.iter().any(|i| i["field"] == "labels"));
                 if !labels_changed {
                     return Ok(TrackerEvent::Ignored {
                         reason: "no label change".into(),

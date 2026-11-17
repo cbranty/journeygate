@@ -89,6 +89,7 @@ pub struct FakeJira {
     inner: InMemoryTracker,
     base_url: String,
     secret: Option<String>,
+    start_statuses: Vec<String>,
 }
 
 impl FakeJira {
@@ -97,7 +98,14 @@ impl FakeJira {
             inner: InMemoryTracker::new(project),
             base_url: "https://jira.fake.invalid".into(),
             secret,
+            start_statuses: Vec::new(),
         }
+    }
+
+    /// `[tracker].start_statuses`, as `JiraTracker::with_start_statuses`.
+    pub fn with_start_statuses(mut self, statuses: Vec<String>) -> Self {
+        self.start_statuses = statuses;
+        self
     }
 }
 
@@ -149,14 +157,16 @@ impl IssueTracker for FakeJira {
                 summary: ticket.summary.clone(),
                 description: ticket.description.clone(),
                 issue_type: ticket.issue_type.clone().unwrap_or_else(|| "Story".into()),
-                status: "To Do".into(),
+                // The delivered status, so a status-change triage re-reads it.
+                status: ticket.status.clone().unwrap_or_else(|| "To Do".into()),
                 status_category: StatusCategory::ToDo,
                 labels: ticket.labels.clone(),
             });
         }
-        Ok(guard_tracker::webhook::to_event(
+        Ok(guard_tracker::webhook::to_event_starting_on(
             &hook,
             Some(FAKE_SELF_ACCOUNT),
+            &self.start_statuses,
         ))
     }
 }
@@ -271,6 +281,43 @@ mod tests {
         let issue = jira.get_issue("SHOP-7").await.unwrap();
         assert_eq!(issue.summary, "Sold out badge");
         assert_eq!(issue.labels, vec!["catalog"]);
+    }
+
+    const MOVED: &str = r#"{"webhookEvent": "jira:issue_updated",
+      "user": {"accountId": "human"},
+      "issue": {"key": "SHOP-7", "fields": {"summary": "Sold out badge",
+        "status": {"name": "In Development"}, "labels": ["area:catalog"]}},
+      "changelog": {"id": "10402", "items": [
+        {"field": "status", "fromString": "To Do", "toString": "In Development"}]}}"#;
+
+    #[tokio::test]
+    async fn fake_jira_maps_a_move_to_a_start_status_and_keeps_the_status() {
+        let jira = FakeJira::new("SHOP", Some("s3cret".into()))
+            .with_start_statuses(vec!["in development".into()]);
+        assert_eq!(
+            jira.parse_webhook(&delivery(MOVED, Some("s3cret"))),
+            Ok(TrackerEvent::StatusChanged {
+                key: "SHOP-7".into(),
+                status: "In Development".into(),
+                change_id: Some("10402".into()),
+            })
+        );
+        // The server re-reads the issue: it must find the delivered status.
+        assert_eq!(
+            jira.get_issue("SHOP-7").await.unwrap().status,
+            "In Development"
+        );
+
+        // Without start statuses the same delivery is ignored, as before.
+        let off = FakeJira::new("SHOP", Some("s3cret".into()));
+        assert!(matches!(
+            off.parse_webhook(&delivery(MOVED, Some("s3cret"))),
+            Ok(TrackerEvent::Ignored { .. })
+        ));
+        // A delivery without a status keeps the fake's default.
+        off.parse_webhook(&delivery(CREATED, Some("s3cret")))
+            .unwrap();
+        assert_eq!(off.get_issue("SHOP-7").await.unwrap().status, "To Do");
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub struct JiraTracker {
     config: JiraConfig,
     http: reqwest::Client,
     self_account_id: OnceLock<String>,
+    start_statuses: Vec<String>,
 }
 
 impl JiraTracker {
@@ -54,7 +55,16 @@ impl JiraTracker {
             config,
             http,
             self_account_id: OnceLock::new(),
+            start_statuses: Vec::new(),
         })
+    }
+
+    /// `[tracker].start_statuses` of `target.toml`: a status change to one of
+    /// them parses to `TrackerEvent::StatusChanged`. Empty (the default):
+    /// status changes are ignored, as before the key existed.
+    pub fn with_start_statuses(mut self, statuses: Vec<String>) -> Self {
+        self.start_statuses = statuses;
+        self
     }
 
     /// Sets guard's own Jira account id without calling `/myself`.
@@ -74,7 +84,7 @@ impl JiraTracker {
 
     /// guard's own account id (`GET /rest/api/3/myself`), fetched once and
     /// cached. The server calls this at startup so `parse_webhook` (sync) can
-    /// ignore label changes made by guard itself.
+    /// ignore label and status changes made by guard itself.
     pub async fn load_self_account_id(&self) -> Result<String, TrackerError> {
         if let Some(id) = self.self_account_id.get() {
             return Ok(id.clone());
@@ -441,9 +451,10 @@ impl IssueTracker for JiraTracker {
 
     fn parse_webhook(&self, request: &WebhookRequest) -> Result<TrackerEvent, TrackerWebhookError> {
         let hook = self.parse_ticket_webhook(request)?;
-        Ok(webhook::to_event(
+        Ok(webhook::to_event_starting_on(
             &hook,
             self.self_account_id.get().map(String::as_str),
+            &self.start_statuses,
         ))
     }
 }

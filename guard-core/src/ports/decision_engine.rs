@@ -38,6 +38,13 @@ pub trait DecisionEngine: Send + Sync {
     /// The pinned model id (`jev-1.13.0`), recorded in the decision log.
     fn model(&self) -> &str;
 
+    /// `false` only for the placeholder installed when no engine is
+    /// configured (no API key): every call of it fails. A configured engine
+    /// that fails still answers `true`, so the two are never confused.
+    fn is_configured(&self) -> bool {
+        true
+    }
+
     /// Asks the seven triage questions in one request and converts the answers.
     async fn triage(&self, request: &TriageRequest) -> Result<TriageAnswers, EngineError>;
 

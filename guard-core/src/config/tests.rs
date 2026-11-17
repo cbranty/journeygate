@@ -280,6 +280,37 @@ fn enums_reject_unknown_values() {
 }
 
 #[test]
+fn tracker_start_statuses_are_optional() {
+    // Absent: the feature is off.
+    let config = parse_target(FULL).unwrap();
+    assert!(config.tracker.unwrap().start_statuses.is_empty());
+
+    let with = |list: &str| {
+        minimal_with(&format!(
+            "[tracker]\nkind = \"jira\"\nstart_statuses = {list}"
+        ))
+    };
+    let config = parse_target(&with(r#"["In Development", "Ready for Dev"]"#)).unwrap();
+    assert_eq!(
+        config.tracker.unwrap().start_statuses,
+        vec!["In Development", "Ready for Dev"]
+    );
+    // Empty: off as well.
+    let config = parse_target(&with("[]")).unwrap();
+    assert!(config.tracker.unwrap().start_statuses.is_empty());
+
+    // A blank or repeated name is a mistake, not a silent no-op.
+    let errors = invalid(&with(r#"["In Development", " "]"#));
+    assert!(has_error(&errors, "tracker.start_statuses"), "{errors:?}");
+    assert_eq!(errors[0].kind, ValidationErrorKind::Empty);
+    let errors = invalid(&with(r#"["Ready", "Ready"]"#));
+    assert_eq!(
+        errors[0].kind,
+        ValidationErrorKind::Duplicate("Ready".into())
+    );
+}
+
+#[test]
 fn ticket_regex_compiles_or_reports_a_typed_error() {
     let config = parse_target(FULL).unwrap();
     let re = config.ticket_regex().unwrap().expect("pattern present");

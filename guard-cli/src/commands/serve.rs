@@ -48,14 +48,21 @@ pub fn listen_addr(flag: Option<&str>, env_value: Option<String>) -> CliResult<S
         .map_err(|_| CliError::usage(format!("invalid listen address {raw:?}")))
 }
 
-/// The engine when no Jev key is configured: every call fails, so triage
-/// goes to the human lane and `/api/impact` answers 503 (fail closed).
+/// The engine when no Jev key is configured: every call fails, so
+/// `issue_created` triage goes to the human lane and `/api/impact` answers
+/// 503 (fail closed). It reports itself as not configured, which lets a
+/// status-change triage decide on the hard rules and the ticket's area label
+/// (`[tracker].start_statuses`, server-api.md).
 struct UnavailableEngine(String);
 
 #[async_trait::async_trait]
 impl DecisionEngine for UnavailableEngine {
     fn model(&self) -> &str {
         guard_jev::MODEL
+    }
+
+    fn is_configured(&self) -> bool {
+        false
     }
 
     async fn triage(&self, _: &TriageRequest) -> Result<TriageAnswers, EngineError> {
@@ -315,6 +322,23 @@ pub fn agent_lane_gate(
     }
 }
 
+/// What the missing engine means for triage. Without `[tracker].start_statuses`
+/// the message is the one printed before that key existed.
+fn engine_warning(error: &str, config: &TargetConfig) -> String {
+    let starts_on_status = config
+        .tracker
+        .as_ref()
+        .is_some_and(|tracker| !tracker.start_statuses.is_empty());
+    if starts_on_status {
+        format!(
+            "engine: {error}; issue_created triage goes to the human lane, and a move to a \
+             start status is decided on the hard rules and the ticket's area label"
+        )
+    } else {
+        format!("engine: {error}; triage goes to the human lane")
+    }
+}
+
 pub fn run(ctx: &Context, args: &ServeArgs) -> CliResult<u8> {
     let owned;
     let ctx = match &args.repo {
@@ -360,7 +384,7 @@ pub fn run(ctx: &Context, args: &ServeArgs) -> CliResult<u8> {
         match guard_jev::JevEngine::from_env() {
             Ok(engine) => Arc::new(engine),
             Err(e) => {
-                warning(format!("engine: {e}; triage goes to the human lane"));
+                warning(engine_warning(&e.to_string(), &config));
                 wiring.engine = "unavailable";
                 Arc::new(UnavailableEngine(e.to_string()))
             }
@@ -381,10 +405,10 @@ pub fn run(ctx: &Context, args: &ServeArgs) -> CliResult<u8> {
             let project = tracker.project.clone().unwrap_or_default();
             if fake_jira {
                 wiring.tracker = "fake";
-                state = state.with_tracker(Arc::new(FakeJira::new(
-                    &project,
-                    env("GUARD_JIRA_WEBHOOK_SECRET"),
-                )));
+                state = state.with_tracker(Arc::new(
+                    FakeJira::new(&project, env("GUARD_JIRA_WEBHOOK_SECRET"))
+                        .with_start_statuses(tracker.start_statuses.clone()),
+                ));
             } else {
                 match guard_tracker::JiraConfig::from_env(
                     &project,
@@ -393,7 +417,8 @@ pub fn run(ctx: &Context, args: &ServeArgs) -> CliResult<u8> {
                 .and_then(guard_tracker::JiraTracker::new)
                 {
                     Ok(jira) => {
-                        let jira = Arc::new(jira);
+                        let jira =
+                            Arc::new(jira.with_start_statuses(tracker.start_statuses.clone()));
                         if jira.load_self_account_id().await.is_err() {
                             // Keep serving; the retry loop warns and logs recovery.
                             tokio::spawn(load_account_id_with_retry(
@@ -702,9 +727,34 @@ mod tests {
         assert_eq!(dashboard_line(true), "dashboard: token login");
     }
 
+    #[test]
+    fn the_engine_warning_names_the_status_change_path_only_when_it_is_on() {
+        let target = |tracker: &str| {
+            guard_core::config::parse_target(&format!(
+                "version = 1\n[app]\nname = \"shop\"\nbase_url = \"http://localhost:3000\"\n\
+                 [testability]\nroles = [\"customer\"]\n\
+                 [areas.catalog]\ndescription = \"Catalog\"\npaths = [\"web/**\"]\n{tracker}"
+            ))
+            .unwrap()
+        };
+        let unchanged = "engine: no key; triage goes to the human lane";
+        assert_eq!(engine_warning("no key", &target("")), unchanged);
+        assert_eq!(
+            engine_warning("no key", &target("[tracker]\nkind = \"jira\"\n")),
+            unchanged
+        );
+        let on = target("[tracker]\nkind = \"jira\"\nstart_statuses = [\"In Development\"]\n");
+        let warning = engine_warning("no key", &on);
+        assert!(warning.starts_with("engine: no key; issue_created triage goes to the human lane"));
+        assert!(warning.contains("hard rules and the ticket's area label"));
+    }
+
     #[tokio::test]
     async fn the_unavailable_engine_fails_closed() {
         let engine = UnavailableEngine("no key".into());
+        // Triage tells this placeholder from a configured engine that failed.
+        assert!(!engine.is_configured());
+        assert!(FakeEngine.is_configured());
         assert!(
             engine
                 .impact(&DiffSummary::default(), &[])

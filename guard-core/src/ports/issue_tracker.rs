@@ -34,6 +34,16 @@ pub enum TrackerEvent {
         key: String,
         labels: Vec<String>,
     },
+    /// `jira:issue_updated` whose changelog moves the status to one of
+    /// `[tracker].start_statuses`: triage it.
+    StatusChanged {
+        key: String,
+        /// The status the issue was moved to, as Jira names it.
+        status: String,
+        /// `changelog.id` when the payload carries one. It tells a redelivery
+        /// (same id) from a later move to the same status (another id).
+        change_id: Option<String>,
+    },
     Ignored {
         reason: String,
     },

@@ -41,6 +41,8 @@ pub fn decision(ticket: &str, decided_at: &str, mode: Mode) -> TriageDecision {
         ticket_key: ticket.into(),
         decided_at: decided_at.into(),
         mode,
+        trigger: TriageTrigger::IssueCreated,
+        engine: Some(EngineUse::Used),
         state: state(),
         answers: Some(answers()),
         engine_error: None,

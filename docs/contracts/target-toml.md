@@ -19,7 +19,7 @@
 
 ## Phase 1 consumers
 
-`guard-cli` reads `[app]`, `[[services]]`, `[testability]`, `[areas]`, `[network]`, `[evidence]` and `[code_host]`, plus `[tracker].ticket_pattern` (used by `guard test --affected` / `guard affected`). `[hard_rules]`, `[server]` and the rest of `[tracker]` are parsed and validated but have no effect in Phase 1.
+`guard-cli` reads `[app]`, `[[services]]`, `[testability]`, `[areas]`, `[network]`, `[evidence]` and `[code_host]`, plus `[tracker].ticket_pattern` (used by `guard test --affected` / `guard affected`). `[hard_rules]`, `[server]` and the rest of `[tracker]` are parsed and validated but have no effect in Phase 1. `[tracker].start_statuses` is read only by `guard serve`.
 
 ## Top level
 
@@ -172,6 +172,7 @@ For a single-service repo (the single-`[app]` shape) the block holds only `# sta
 | `project` | string | no | absent | `^[A-Z][A-Z0-9_]*$`. Phase 2. |
 | `ticket_pattern` | string | no | absent | Regex in Rust `regex` syntax. The first match in the current branch name is the ticket key, which adds `@ticket:<KEY>` to `--affected`. In TOML use a literal string: `'SHOP-\d+'`. |
 | `require_ticket` | `"warn"` \| `"block"` | no | `"warn"` | Phase 2. |
+| `start_statuses` | array of strings | no | `[]` | Jira status names. Moving an issue to one of them starts triage in `guard serve` ([`server-api.md`](server-api.md), "Start on a status change"). Names are compared case-insensitively, ignoring surrounding whitespace. Absent or empty: the feature is off. Entries must not be blank or repeated. |
 
 ## `[code_host]`
 
@@ -251,6 +252,7 @@ kind = "jira"
 project = "SHOP"
 ticket_pattern = 'SHOP-\d+'
 require_ticket = "warn"
+start_statuses = ["In Development"]
 
 [code_host]
 kind = "github"

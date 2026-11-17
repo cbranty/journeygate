@@ -21,7 +21,9 @@
 //!
 //! No hit = `Lane::Agent`. `EngineUnavailable` and `ShadowMode` are never
 //! produced by [`decide`]: see [`decide_without_engine`] and
-//! `triage::effective_lane`.
+//! `triage::effective_lane`. `NoAreaLabel` comes only from
+//! [`decide_by_rules`], the decision of a status change on a server without
+//! an engine (checks 1-4, with the area read from the ticket's labels).
 
 use crate::config::TargetConfig;
 use crate::ports::types::{Area, HumanReason, ImpactFacts, Kind, Lane, TriageAnswers};
@@ -125,6 +127,33 @@ pub fn decide_without_engine(facts: &ImpactFacts, rules: &GateRules) -> Lane {
     let mut reasons = hard_rule_reasons(facts, rules);
     reasons.push(HumanReason::EngineUnavailable);
     Lane::Human(reasons)
+}
+
+/// The decision when no engine is configured and a status change started the
+/// triage. The hard rules still apply (checks 1-3); the area comes from the
+/// ticket's own `area:<key>` labels instead of an engine answer:
+///
+/// - no label naming a key of `[areas]` (`ticket_areas` empty): `NoAreaLabel`,
+///   because nothing says where an agent may write;
+/// - a labelled area with `sensitive = true`: `SensitiveArea` (check 4).
+///
+/// No hit = `Lane::Agent`. The calibrated checks 5-11 need engine answers and
+/// are not evaluated.
+pub fn decide_by_rules(facts: &ImpactFacts, rules: &GateRules, ticket_areas: &[Area]) -> Lane {
+    let mut reasons = hard_rule_reasons(facts, rules);
+    if ticket_areas.is_empty() {
+        reasons.push(HumanReason::NoAreaLabel);
+    } else if ticket_areas
+        .iter()
+        .any(|a| rules.sensitive_areas.contains(a))
+    {
+        reasons.push(HumanReason::SensitiveArea);
+    }
+    if reasons.is_empty() {
+        Lane::Agent
+    } else {
+        Lane::Human(reasons)
+    }
 }
 
 /// Checks 1-3: facts computed in Rust that the engine can never override.

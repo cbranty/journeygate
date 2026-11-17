@@ -10,11 +10,6 @@ use guard_core::thresholds::Mode;
 use guard_server::triage::{TriageError, triage_ticket};
 use std::sync::Arc;
 
-fn active(mut state: guard_server::AppState) -> guard_server::AppState {
-    state.thresholds.mode = Mode::Active;
-    state
-}
-
 async fn only_decision(fakes: &Fakes) -> TriageDecision {
     let rows = fakes
         .store
@@ -180,24 +175,6 @@ async fn impact_failure_fails_closed_without_asking_the_engine() {
     assert!(decision.engine_error.as_deref().unwrap().contains("impact"));
 }
 
-struct DownLog;
-
-#[async_trait::async_trait]
-impl DecisionLog for DownLog {
-    async fn record_decision(&self, _: &TriageDecision) -> Result<DecisionId, StoreError> {
-        Err(StoreError::Unavailable("connection refused".into()))
-    }
-    async fn record_human_label(&self, _: &HumanLabel) -> Result<(), StoreError> {
-        Err(StoreError::Unavailable("connection refused".into()))
-    }
-    async fn list_for_calibration(
-        &self,
-        _: &CalibrationQuery,
-    ) -> Result<Vec<CalibrationRow>, StoreError> {
-        Err(StoreError::Unavailable("connection refused".into()))
-    }
-}
-
 #[tokio::test]
 async fn an_unrecorded_decision_never_applies_the_agent_lane() {
     let fakes =
@@ -214,32 +191,6 @@ async fn an_unrecorded_decision_never_applies_the_agent_lane() {
 }
 
 // ------------------------------------------------------------ agent lane hook
-
-#[derive(Default)]
-struct RecordingLane {
-    calls: std::sync::Mutex<Vec<(String, DecisionId, Vec<String>)>>,
-}
-
-#[async_trait::async_trait]
-impl guard_server::AgentLane for RecordingLane {
-    async fn enqueue(
-        &self,
-        issue: &Issue,
-        decision: DecisionId,
-        labels: &[String],
-    ) -> Result<(), String> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push((issue.key.clone(), decision, labels.to_vec()));
-        Ok(())
-    }
-}
-
-fn with_lane(state: guard_server::AppState) -> (guard_server::AppState, Arc<RecordingLane>) {
-    let lane = Arc::new(RecordingLane::default());
-    (state.with_agent_lane(lane.clone()), lane)
-}
 
 #[tokio::test]
 async fn active_lane_a_tickets_are_handed_to_the_agent_lane() {

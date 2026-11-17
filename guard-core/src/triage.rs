@@ -10,11 +10,13 @@
 //! facts    = impact.fan_out(resolved paths)
 //! state    = build_state(issue, modules, facts.blast_radius())
 //! decided  = engine.triage(..).map(decide).unwrap_or(decide_without_engine)
+//!            (a status change without a configured engine: decide_by_rules)
 //! log.record_decision(..)                        (always, also in shadow mode)
 //! applied  = effective_lane(decided, mode)
 //! labels   = jira_labels(answers, decided)       -> add_labels (active) / suggest_labels (shadow)
 //! ```
 
+use crate::config::TargetConfig;
 use crate::ports::types::{
     Area, BlastRadius, HumanLabel, HumanReason, Issue, Kind, LabelSource, Lane, LaneKind,
     TriageAnswers, TriageState,
@@ -274,6 +276,29 @@ pub fn build_state(
         mentioned_modules,
         blast_radius,
     }
+}
+
+/// Whether `status` is one of `[tracker].start_statuses`. Names are compared
+/// case-insensitively and ignoring surrounding whitespace; an empty list
+/// matches nothing (the feature is off).
+pub fn is_start_status(start_statuses: &[String], status: &str) -> bool {
+    let status = status.trim().to_lowercase();
+    start_statuses
+        .iter()
+        .any(|s| s.trim().to_lowercase() == status)
+}
+
+/// The areas a ticket names itself: the keys of its `area:<key>` labels that
+/// exist in `[areas]`, in label order, without repeats. Labels naming an
+/// unknown key are skipped.
+pub fn labelled_areas(labels: &[String], config: &TargetConfig) -> Vec<Area> {
+    let mut areas: Vec<Area> = Vec::new();
+    for key in labels.iter().filter_map(|l| l.strip_prefix("area:")) {
+        if config.areas.contains_key(key) && !areas.iter().any(|a| a.as_str() == key) {
+            areas.push(Area::new(key));
+        }
+    }
+    areas
 }
 
 /// The lane that is applied: in Shadow Mode always `Human([ShadowMode])`,

@@ -46,6 +46,8 @@ fn decision(key: &str, at: &str) -> TriageDecision {
         ticket_key: key.into(),
         decided_at: at.into(),
         mode: Mode::Shadow,
+        trigger: TriageTrigger::IssueCreated,
+        engine: Some(EngineUse::Used),
         state: request(key).state,
         answers: Some(answers()),
         engine_error: None,
@@ -294,6 +296,77 @@ fn tracker_parses_jira_webhook_payloads() {
         }),
         Err(TrackerWebhookError::Malformed(_))
     ));
+}
+
+#[test]
+fn tracker_parses_a_move_to_a_start_status() {
+    let req = |body: serde_json::Value| WebhookRequest {
+        body: serde_json::to_vec(&body).unwrap(),
+        ..WebhookRequest::default()
+    };
+    let moved = |to: &str| {
+        req(serde_json::json!({
+            "webhookEvent": "jira:issue_updated",
+            "issue": {"key": "SHOP-7"},
+            "changelog": {"id": "10402", "items": [
+                {"field": "status", "fromString": "To Do", "toString": to}
+            ]}
+        }))
+    };
+    let tracker = InMemoryTracker::new("SHOP").with_start_statuses(&["In Development"]);
+    assert_eq!(
+        tracker.parse_webhook(&moved("in development")),
+        Ok(TrackerEvent::StatusChanged {
+            key: "SHOP-7".into(),
+            status: "in development".into(),
+            change_id: Some("10402".into()),
+        })
+    );
+    assert!(matches!(
+        tracker.parse_webhook(&moved("Done")),
+        Ok(TrackerEvent::Ignored { .. })
+    ));
+    // Without start statuses a status change is not an event.
+    assert_eq!(
+        InMemoryTracker::new("SHOP").parse_webhook(&moved("In Development")),
+        Ok(TrackerEvent::Ignored {
+            reason: "no label change".into()
+        })
+    );
+}
+
+#[tokio::test]
+async fn the_engine_reports_whether_it_is_configured() {
+    assert!(FakeDecisionEngine::new().is_configured());
+    let engine = FakeDecisionEngine::not_configured();
+    assert!(!engine.is_configured());
+    assert!(matches!(
+        engine.triage(&request("SHOP-1")).await,
+        Err(EngineError::Unconfigured(_))
+    ));
+}
+
+#[test]
+fn a_decision_stored_before_trigger_and_engine_existed_still_reads() {
+    let mut json = serde_json::to_value(decision("SHOP-1", "2026-11-01T10:00:00Z")).unwrap();
+    assert_eq!(json["trigger"], "issue_created");
+    assert_eq!(json["engine"], "used");
+    let stored = json.as_object_mut().unwrap();
+    stored.remove("trigger");
+    stored.remove("engine");
+    let read: TriageDecision = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        read,
+        TriageDecision {
+            trigger: TriageTrigger::IssueCreated,
+            engine: None,
+            ..decision("SHOP-1", "2026-11-01T10:00:00Z")
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(HumanReason::NoAreaLabel).unwrap(),
+        "no_area_label"
+    );
 }
 
 // ------------------------------------------------------------ code host

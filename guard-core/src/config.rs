@@ -190,6 +190,10 @@ pub struct Tracker {
     pub ticket_pattern: Option<String>,
     #[serde(default)]
     pub require_ticket: RequireTicket,
+    /// Jira status names that start triage when an issue is moved to one of
+    /// them (compared case-insensitively). Empty: the feature is off.
+    #[serde(default)]
+    pub start_statuses: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -489,6 +493,11 @@ pub fn validate(config: &TargetConfig) -> Vec<ValidationError> {
             v.pattern("tracker.project", project, PROJECT_KEY);
         }
         v.optional_non_empty("tracker.ticket_pattern", tracker.ticket_pattern.as_deref());
+        // A blank name can never equal a Jira status name.
+        if tracker.start_statuses.iter().any(|s| s.trim().is_empty()) {
+            v.push("tracker.start_statuses", ValidationErrorKind::Empty);
+        }
+        v.unique("tracker.start_statuses", &tracker.start_statuses);
     }
     if let Some(server) = &config.server {
         v.pattern("server.url", &server.url, HTTP_URL);

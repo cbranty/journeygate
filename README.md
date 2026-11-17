@@ -101,6 +101,7 @@ Point the CLI at it with `[server] url = "http://127.0.0.1:8099"` in `target.tom
 | MCP server | `guard mcp` over stdio, 7 tools: `guard_affected`, `guard_test`, `guard_failure`, `guard_repro`, `guard_catalog`, `guard_history`, `guard_map`. Assistants run and read tests; they cannot edit or bypass the gate. |
 | Dashboard | Read-only pages served by `guard serve` (decisions, gate results, flaky tests, durations, coverage, agents). |
 | Desktop GUI | `guard-gui`, a native egui window over the `guard` binary. Stores API keys in the Windows Credential Manager. Not shipped in releases yet: build it with cargo ([`guard-gui/README.md`](guard-gui/README.md)). |
+| Triage | `guard serve` routes a Jira ticket to the agent lane or the human lane when it is created, and when it is moved to a status listed in `[tracker].start_statuses` (off by default). Hard rules on facts are never overridden; Shadow Mode only suggests labels. |
 | Agent lane | Optional: QA writes the spec, red-first, sealed; the Coder attempts; the gate runs in a no-egress sandbox; a draft PR on `agent/<KEY>` waits for human approval. |
 
 ### `guard explain` configuration
@@ -150,7 +151,7 @@ Full method, C# and PHP extensions, and threats to validity: [`docs/benchmarks/i
 | CI | The GitHub Action [`ci/github-action`](ci/github-action/action.yml) and the GitLab component [`ci/gitlab/templates/gate.yml`](ci/gitlab/templates/gate.yml). |
 | Agent runtimes | `claude-code`, `codex` and `mini-swe-agent` (admitted); `copilot-cli` and `openhands` (provisional); a scripted `fake` for tests. Runtime and gateway behavior is verified only with fakes and recorded fixtures. |
 | Model gateway | LiteLLM, the only egress allowed from agent sandboxes. |
-| Decision engine | TypeSafe Jev, optional, proprietary and paid. Without it, triage fails closed to the human lane and affected selection keeps the path rules. |
+| Decision engine | TypeSafe Jev, optional, proprietary and paid. Without it, triage of a created ticket fails closed to the human lane and affected selection keeps the path rules. A ticket moved to a start status is still decided: the hard rules apply, then it needs an `area:<key>` label naming a non-sensitive area of `target.toml` to reach the agent lane ([`server-api.md`](docs/contracts/server-api.md), "Start on a status change"). |
 
 ## CLI reference
 

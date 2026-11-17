@@ -5,7 +5,9 @@
 //! the previous one for the same `(event, issue)` within [`DEDUPE_WINDOW`] is
 //! dropped, so a redelivered `issue_created` never triages twice. A label
 //! change that is reverted and redone is not identical to the previous
-//! delivery, so it is recorded each time.
+//! delivery, so it is recorded each time. A status change is identified by
+//! its status name and `changelog.id`: a redelivery repeats both, a later
+//! move to the same status has a new id and is triaged again.
 //!
 //! Accepted deliveries are processed after the `202`; a transient failure
 //! (transport, rate limit, 5xx, store unavailable) is retried with

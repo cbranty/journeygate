@@ -8,10 +8,12 @@
 //! `changelog`). `issue.fields.description` and the acceptance-criteria custom
 //! field arrive as a plain/wiki string (admin webhooks) or as ADF (Automation
 //! with `{{issue.fields.description.asJsonString}}`-style bodies); both are
-//! accepted.
+//! accepted. A status change is the `changelog.items[]` entry with `field`
+//! `status`; its `toString` is the name of the status the issue was moved to.
 
 use crate::adf;
 use guard_core::ports::{TrackerEvent, TrackerWebhookError, WebhookRequest};
+use guard_core::triage::is_start_status;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -27,6 +29,8 @@ pub struct JiraTicket {
     pub acceptance_criteria: Vec<String>,
     pub labels: Vec<String>,
     pub issue_type: Option<String>,
+    /// `issue.fields.status.name`: the status after the event, when delivered.
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +59,11 @@ pub struct JiraWebhook {
     pub human_labels: Vec<String>,
     /// `user.accountId`: who triggered the event.
     pub actor_account_id: Option<String>,
+    /// The `toString` of the last `status` item of `changelog.items[]`: the
+    /// status name the issue was moved to. `None` without a status change.
+    pub status_changed_to: Option<String>,
+    /// `changelog.id` (a string or a number in the payload): one id per change.
+    pub change_id: Option<String>,
 }
 
 /// Checks the shared secret. Comparison is constant-time in the secret length.
@@ -129,15 +138,7 @@ pub fn parse_payload(
         None => None,
     };
 
-    let label_items: Vec<&Value> = v["changelog"]["items"]
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter(|i| i["field"] == "labels" || i["fieldId"] == "labels")
-                .collect()
-        })
-        .unwrap_or_default();
+    let label_items = changelog_items(&v, "labels");
     let labels_changed = !label_items.is_empty();
     let mut labels_after: Vec<String> = match v["issue"]["fields"]["labels"].as_array() {
         Some(labels) => labels
@@ -183,7 +184,31 @@ pub fn parse_payload(
         labels_after,
         human_labels,
         actor_account_id: v["user"]["accountId"].as_str().map(str::to_string),
+        status_changed_to: changelog_items(&v, "status")
+            .last()
+            .and_then(|i| i["toString"].as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string),
+        change_id: match &v["changelog"]["id"] {
+            Value::String(id) if !id.is_empty() => Some(id.clone()),
+            Value::Number(id) => Some(id.to_string()),
+            _ => None,
+        },
     })
+}
+
+/// The `changelog.items[]` entries of `field` (matched on `field` or `fieldId`).
+fn changelog_items<'a>(v: &'a Value, field: &str) -> Vec<&'a Value> {
+    v["changelog"]["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter(|i| i["field"] == field || i["fieldId"] == field)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The guard-managed family of a label (see `guard_core::triage::jira_labels`).
@@ -212,6 +237,7 @@ fn ticket(key: &str, fields: &Value, ac_field: Option<&str>) -> JiraTicket {
             })
             .unwrap_or_default(),
         issue_type: fields["issuetype"]["name"].as_str().map(str::to_string),
+        status: fields["status"]["name"].as_str().map(str::to_string),
     }
 }
 
@@ -262,24 +288,52 @@ fn strip_bullet(line: &str) -> String {
     s.trim().to_string()
 }
 
-/// Maps a parsed delivery to the port event. `self_account_id` is guard's own
-/// Jira account (`GET /rest/api/3/myself`): label changes it made are
-/// ignored, and while it is unknown label changes are ignored too (fail
-/// closed: guard's own writes must never pollute the calibration ground truth).
+/// Maps a parsed delivery to the port event, for a server without
+/// `[tracker].start_statuses`: [`to_event_starting_on`] with an empty list.
 pub fn to_event(webhook: &JiraWebhook, self_account_id: Option<&str>) -> TrackerEvent {
+    to_event_starting_on(webhook, self_account_id, &[])
+}
+
+/// Maps a parsed delivery to the port event. `start_statuses` is
+/// `[tracker].start_statuses`: an `issue_updated` that moves the issue to one
+/// of them (case-insensitive) is a `StatusChanged`, also when the same
+/// changelog changes labels. Any other `issue_updated` is a `LabelsChanged`
+/// when it changes labels, and ignored otherwise.
+///
+/// `self_account_id` is guard's own Jira account (`GET /rest/api/3/myself`):
+/// label and status changes it made are ignored, and while it is unknown
+/// they are all ignored too (fail closed: guard's own writes must never
+/// pollute the calibration ground truth nor start a triage).
+pub fn to_event_starting_on(
+    webhook: &JiraWebhook,
+    self_account_id: Option<&str>,
+    start_statuses: &[String],
+) -> TrackerEvent {
     let key = webhook.ticket.as_ref().map(|t| t.key.clone());
     match (&webhook.event, key) {
         (JiraWebhookEvent::IssueCreated, Some(key)) => TrackerEvent::IssueCreated { key },
         (JiraWebhookEvent::IssueUpdated, Some(key)) => {
-            if !webhook.labels_changed {
+            let started = webhook
+                .status_changed_to
+                .as_deref()
+                .filter(|status| is_start_status(start_statuses, status));
+            if started.is_none() && !webhook.labels_changed {
                 return ignored("issue updated without a labels change");
             }
-            match self_account_id {
-                None => ignored("guard's own Jira account id is not loaded"),
-                Some(own) if webhook.actor_account_id.as_deref() == Some(own) => {
-                    ignored("label change made by guard's own Jira user")
+            match (self_account_id, started) {
+                (None, _) => ignored("guard's own Jira account id is not loaded"),
+                (Some(own), started) if webhook.actor_account_id.as_deref() == Some(own) => {
+                    ignored(match started {
+                        Some(_) => "status change made by guard's own Jira user",
+                        None => "label change made by guard's own Jira user",
+                    })
                 }
-                Some(_) => TrackerEvent::LabelsChanged {
+                (Some(_), Some(status)) => TrackerEvent::StatusChanged {
+                    key,
+                    status: status.to_string(),
+                    change_id: webhook.change_id.clone(),
+                },
+                (Some(_), None) => TrackerEvent::LabelsChanged {
                     key,
                     labels: webhook.human_labels.clone(),
                 },

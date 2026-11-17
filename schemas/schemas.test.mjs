@@ -142,6 +142,31 @@ test('target: enums for evidence.video, code_host.kind, tracker.require_ticket',
   bad(targetSchema, c, 'enum');
 });
 
+test('target: tracker.start_statuses is an optional list of status names', () => {
+  // Absent or empty: the feature is off.
+  ok(targetSchema, targetMinimal);
+  const off = clone(targetExample);
+  delete off.tracker.start_statuses;
+  ok(targetSchema, off);
+  off.tracker.start_statuses = [];
+  ok(targetSchema, off);
+
+  assert.deepEqual(targetExample.tracker.start_statuses, ['In Development']);
+  const several = clone(targetExample);
+  several.tracker.start_statuses = ['In Development', 'Ready for Dev'];
+  ok(targetSchema, several);
+
+  const notAList = clone(targetExample);
+  notAList.tracker.start_statuses = 'In Development';
+  bad(targetSchema, notAList, 'start_statuses');
+  const blank = clone(targetExample);
+  blank.tracker.start_statuses = ['In Development', '  '];
+  bad(targetSchema, blank, 'pattern');
+  const repeated = clone(targetExample);
+  repeated.tracker.start_statuses = ['Ready', 'Ready'];
+  bad(targetSchema, repeated, 'start_statuses');
+});
+
 test('target: ready_path and paths in [testability] must start with "/"', () => {
   const v = clone(targetExample);
   v.app.ready_path = 'healthz';
